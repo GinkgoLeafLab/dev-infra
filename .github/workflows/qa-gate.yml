@@ -103,12 +103,18 @@ jobs:
       #
       # always()：写检查失败也摘。失败时 job 是红的、看得见，而留着标签只会让人
       # 以为已经放行了；重新打一次标签就是重试。
-      # **这一步留在 job 里、没有搬进组合动作**，硬的理由是
-      # **组合动作读不到 `secrets` 上下文**，而摘标签要 `secrets.GITHUB_TOKEN`——
-      # 它搬不进去，不是「不想搬」。
-      # （曾经写的理由是「组合动作里的 `always()` 没有官方保证」，那条不准：
-      # 官方 metadata-syntax 文档里确实有组合动作用 `failure()` 的例子。
-      # 留着上面那条真正成立的。）
+      # **这一步留在 job 里、没有搬进组合动作**，而且**是取舍，不是限制**：
+      # 组合动作读不到 `secrets` 上下文（官方 contexts reference 原话
+      # "The `secrets` context is not available for composite actions due to
+      # security reasons."），但同一页**紧接着那一句就给了绕法**——
+      # "If you want to pass a secret to a composite action, you need to do it
+      # explicitly as an input."，也就是把 `GITHUB_TOKEN` 当 input 显式交给一个
+      # **跨仓库的动作**。为两行 `gh api` 扩大那枚 token 的去处不值，所以不做。
+      #
+      # **这条理由写错过两次，方向一模一样：都想把它说成「不可能」。**
+      # 先是「组合动作里的 `always()` 没有官方保证」（metadata-syntax 文档里就有
+      # 组合动作用 `failure()` 的例子），再是「搬不进去」（被上面那句 input 推翻）。
+      # 想搬的人要推翻的是上面那个取舍，**别再找第三条假限制**。
       #
       # 走 GITHUB_TOKEN 摘标签不会再触发新的 workflow run（GitHub 文档：events
       # triggered by the GITHUB_TOKEN will not create a new workflow run），不会绕成环。
