@@ -302,18 +302,41 @@ for (const [name, env] of BAD) {
      **说准它拦不住什么**：拼错一个还不存在的版本号（`v1.2.O`、`v1.20`）它看不见，
      那一条靠的是发布流程本身——README 写明「内层 `uses:` 写的是哪个 tag 就打哪个」，
      人照着那一行打 tag，打错就是当场跑不起来、看得见。
-     拿不到 git（不是克隆、或者没有 tag）时这条**跳过**并说明，不静默当过。 */
+
+     **「这个 tag 本地没有」有两种完全不同的原因，必须分开，不许合成一条。**
+     第一版就是合成一条的，而且**它在 CI 里恒为跳过**——`actions/checkout` 默认
+     `fetch-tags: false`，工作副本里一个 tag 都没有，于是 W8 每次都走「前向引用」
+     那条分支，**还把这句假话打出来**（`v1` 明明存在）。评审在 dev-infra#3 上抓到的：
+     按 CI 的取法重做变异，退回 `@v1` 时只有 W3 红，而 W8 独占的那条路径
+     （形状合法、内容没有）一次都没被覆盖。
+     **守卫绿着、还宣称自己在看——那正是这个 PR 要修的那个形状，它自己犯了一遍。**
+
+     所以现在分三种：
+     - **一个 tag 都没有** → **红**，并说清是取法的问题。有了 `fetch-tags: true`
+       这种状态就不该出现，谁把它拿掉，这条当场响
+     - **有 tag、但没有这一个** → 前向引用，跳过。**这时那句话才是真的**
+     - **不是 git 仓库 / 没有 git** → 跳过并说明，这是唯一一种真的验不了的情况 */
   const ref = (wf.match(/uses: GinkgoLeafLab\/dev-infra\/\.github\/actions\/qa-gate@(\S+)/) || [])[1];
   const root = path.join(dir, "..");   /* dir 是 .github/，再上一层是仓库根 */
   const git = (args) => require("child_process")
     .spawnSync("git", ["-C", root, ...args], { encoding: "utf8" });
-  const known = ref && git(["rev-parse", "--verify", "--quiet", `refs/tags/${ref}`]).status === 0;
+  const inRepo = git(["rev-parse", "--git-dir"]).status === 0;
+  const anyTag = inRepo && (git(["tag", "-l"]).stdout || "").trim() !== "";
+  const known = ref && inRepo && git(["rev-parse", "--verify", "--quiet", `refs/tags/${ref}`]).status === 0;
+
   if (!ref) {
     ok("W8 前提：读得出内层引用的那个 tag", false);
-  } else if (git(["rev-parse", "--git-dir"]).status !== 0) {
-    console.log(`  · W8 跳过：这儿不是 git 仓库，验不了 tag \`${ref}\` 的内容`);
+  } else if (!inRepo) {
+    /* 唯一一种真的验不了的情况：没有 git，或者这份代码不是从仓库里来的 */
+    console.log(`  · W8 跳过：这儿不是 git 仓库（或没有 git），验不了 tag \`${ref}\` 的内容`);
+  } else if (!anyTag) {
+    ok("W8 前提：**本地取到了 tag**——一个都没有说明 checkout 没带 tag 下来" +
+       "（`actions/checkout` 默认 `fetch-tags: false`），那样 W8 会把每一次都当成" +
+       "「前向引用」放过去，**包括引用了一个真实存在、但内容对不上的旧 tag**。" +
+       "修法是给 checkout 加 `fetch-tags: true`，不是把这条改绿",
+      false);
   } else if (!known) {
-    /* 前向引用，正常状态 */
+    /* 有 tag 但没有这一个 —— 到这儿「前向引用」才是一句真话 */
     console.log(`  · W8 跳过：tag \`${ref}\` 还不存在（前向引用，发布时才打）`);
   } else {
     const tree = git(["ls-tree", "--name-only", ref, ".github/actions/qa-gate/"]).stdout || "";
