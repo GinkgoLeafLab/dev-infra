@@ -53,6 +53,9 @@ name: qa-gate (reusable)
 #    `actions/checkout`（去取自己仓里的 scripts/qa-gate.js），所以非要这一条不可，
 #    漏了就报 `remote: Repository not found`——指不到权限上，几个仓都为它红过。
 #    脚本跟着组合动作下发之后，这条路上一次 checkout 都不做，那个坑结构性地没有了。
+#    （拉取组合动作本身不走这枚 token：官方 Sharing actions and workflows from your
+#    private repository 原话是 "To allow runners to download these actions, GitHub
+#    passes a scoped installation token to the runner."）
 #    **别把 checkout 加回来**：权限只能降不能升，caller 没给 contents，
 #    加回来会在所有消费仓同时红掉（qa-gate.test.js 的 W4 钉着这条）。
 #
@@ -100,8 +103,12 @@ jobs:
       #
       # always()：写检查失败也摘。失败时 job 是红的、看得见，而留着标签只会让人
       # 以为已经放行了；重新打一次标签就是重试。
-      # **这一步留在 job 里、没有搬进组合动作**：组合动作里步骤失败之后的
-      # `always()` 语义没有官方保证，而这一步漏跑的后果是一句假话挂在 PR 上。
+      # **这一步留在 job 里、没有搬进组合动作**，硬的理由是
+      # **组合动作读不到 `secrets` 上下文**，而摘标签要 `secrets.GITHUB_TOKEN`——
+      # 它搬不进去，不是「不想搬」。
+      # （曾经写的理由是「组合动作里的 `always()` 没有官方保证」，那条不准：
+      # 官方 metadata-syntax 文档里确实有组合动作用 `failure()` 的例子。
+      # 留着上面那条真正成立的。）
       #
       # 走 GITHUB_TOKEN 摘标签不会再触发新的 workflow run（GitHub 文档：events
       # triggered by the GITHUB_TOKEN will not create a new workflow run），不会绕成环。
