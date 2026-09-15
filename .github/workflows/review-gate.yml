@@ -1,0 +1,117 @@
+name: review-gate (reusable)
+
+# 把 code-reviewer 的「通过」结论变成一个挂在 PR head SHA 上的必需检查 `review`。
+# 各仓库只留一个十几行的 caller，逻辑只有这一份。
+#
+# 调研与取舍见 GTO-Trainer 仓的 docs/方案/2026-08-PR-评审强制.md、
+# docs/方案/2026-09-放行检查改用-commit-status.md 与
+# docs/方案/2026-09-跨仓库基础设施复用.md。
+#
+# ---------------------------------------------------------------------------
+# caller 必须自己提供这三样，**一样都不能搬进来**
+# ---------------------------------------------------------------------------
+#
+# 1. `on: pull_request_target: types: [labeled]`
+#    可复用工作流没有自己的触发器，事件永远来自 caller。
+#    **必须是 pull_request_target 不是 pull_request**：前者的定义取自默认分支，
+#    后者能让一个 PR 改写自己那份 caller 来放行自己。
+#
+# 2. **job 级的 `if: github.event.label.name == 'review-passed'`**
+#    这一条是**账单前提，不是过滤器**：job 级的 if 为 false 时 runner 根本不会起、
+#    不计分钟数（GitHub 员工在官方社区论坛 orgs/community discussion #26456 的原话：
+#    "those workflows never start up a runner, so they do not count towards the
+#    included minutes"，**来源等级低于定价页正文**）。
+#    搬进这份文件就变成「起了 runner 再判断」——功能完全正常，只有账单变了，
+#    而且没有任何症状。别搬。
+#
+# 3. `permissions: { statuses: write, pull-requests: write }` 写在**调用这份文件的那个 job 上**
+#    官方原话："If `jobs.<job_id>.permissions` is not specified in the calling job,
+#    the called workflow will have the default permissions for the `GITHUB_TOKEN`."
+#    以及 "The `GITHUB_TOKEN` permissions passed from the caller workflow can be only
+#    downgraded (not elevated) by the called workflow."
+#    ——所以在这里写 permissions 是没用的：给多了升不上去，给少了反而是降级。
+#    caller 漏写的表现是这个 job 403 变红、检查写不上、PR 被拦住——**失败方向是安全那边**。
+#
+# 这份文件为什么读得到 caller 的事件：官方原话
+# "When a reusable workflow is triggered by a caller workflow, the `github` context
+# is always associated with the caller workflow."
+# 以及 "The called workflow is automatically granted access to `github.token` and
+# `secrets.GITHUB_TOKEN`."——所以下面那些 github.event.* 取到的是 caller 那次 labeled 事件，
+# 而且不需要 caller 写 `secrets: inherit`。
+#
+# ---------------------------------------------------------------------------
+# 为什么是一个检查而不是 approve
+# ---------------------------------------------------------------------------
+#
+# 1. **缺席即拦**。必需检查没被报告时，PR 停在 "Expected — waiting for status" 上合不了。
+#    所以「从没派过评审」这种 PR 默认就是拦住的，不需要任何人做任何事。
+#    换成 required approvals 也有这个性质，但那个动作必须来自非作者身份，
+#    要为它建 GitHub App、管私钥；而写一条 commit status 用 Actions 自带的
+#    GITHUB_TOKEN 就够。
+# 2. **它挂在 commit SHA 上**，这正是「审的是这一版」的天然表达：
+#    推一个新 commit，新 SHA 上没有它，PR 立刻变回拦住状态。
+#    不用依赖 "dismiss stale approvals" 那种补丁。
+#
+# **为什么是 commit status 而不是 check run**：在 GTO-Trainer 仓实测过——那个仓库的
+# 必需检查**不匹配**用 Checks API 现写的 check run（#67 / #68 上它确实存在于 head SHA、
+# 结论正常，merge box 照样说「Expected — Waiting for status to be reported」，
+# 而同一个 PR 上 job 产出的 `test` 匹配得上）；换成 commit status 之后 #69 当场变 clean。
+# **原因没查到出处**，所以这条只能靠「实测过、别改回去」拦——
+# 改回去 PR 就再也合不了，而这个 gate job 还是绿的。
+
+on:
+  workflow_call:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # permissions 不写在这儿，见上面第 3 条。
+    steps:
+      # gh 和 jq 都是 GitHub hosted runner 预装的，不是这里装的东西。
+      #
+      # 钉死 head.sha 而不是让 API 自己找：如果打标签的同时有人推了新 commit，
+      # 检查会落在旧 SHA 上，PR 仍然是拦住的——**失败方向是安全的那一边**。
+      #
+      # 用 jq 拼 JSON 再 --input -，**不要**写成 `gh api -f 'output[title]=…'`：
+      # gh 对非 GET 请求是把 -f 收集成一个扁平 map 直接 json.Marshal
+      # （cli/cli 的 pkg/cmd/api/http.go，那里有一句注释写着嵌套子键的支持
+      # "can be added here if that is ever necessary"——也就是还没做）。
+      # 方括号不展开，发出去就是一个字面 key，而 GitHub 忽略未知字段，
+      # 结果是**检查照样创建、绿勾照常，只有 output 静默丢掉**——最难发现的那种失败。
+      # jq 顺带把登录名的转义也接过去了。
+      #
+      # 走环境变量而不是把登录名直接插进 run：那是注入口子。
+      - name: 在 head SHA 上写 review commit status
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          ACTOR: ${{ github.event.sender.login }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        # description 限 140 字符，超了整个请求会被 GitHub 拒——展开的理由指回这次 run。
+        run: |
+          jq -n --arg actor "$ACTOR" --arg url "$RUN_URL" '{
+            state: "success",
+            context: "review",
+            description: ("评审通过：由 @" + $actor + " 打上 review-passed 标签触发"),
+            target_url: $url
+          }' | gh api "repos/$REPO/statuses/$SHA" --input -
+
+      # 标签是**一次性信号**，不是状态：摘掉它，下一轮要放行必须重新打。
+      # 不摘的话，推了新代码之后标签还挂在那儿显示「已通过」，而新 SHA 上根本没有检查——
+      # 那就是一句假话，比没有标签更糟。
+      #
+      # always()：写检查失败也摘。失败时 job 是红的、看得见，而留着标签只会让人
+      # 以为已经放行了；重新打一次标签就是重试。
+      #
+      # 摘标签走 GITHUB_TOKEN，它触发的事件不会再产生新的 workflow run
+      # （GitHub 文档：events triggered by the GITHUB_TOKEN will not create a new
+      # workflow run），所以不会和 caller 的 labeled 触发器绕成环。
+      - name: 摘掉标签
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: gh api -X DELETE "repos/$REPO/issues/$PR/labels/review-passed"
