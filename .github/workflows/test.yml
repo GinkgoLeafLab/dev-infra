@@ -31,7 +31,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # **`fetch-tags: true` 不是可选的**：`actions/checkout` 默认 `fetch-tags: false`，
+      # 工作副本里一个 tag 都没有，而 qa-gate.test.js 的 W8 要按 tag 读内容
+      # （「内层 `uses:` 指的那个 tag 上真的有这个动作吗」）。没有 tag 时它会把
+      # **每一次**都当成「前向引用」放过去——包括引用了一个真实存在、内容却对不上的
+      # 旧 tag，也就是 dev-infra#3 修的那个 bug 本身。
+      # 拿掉这一行，W8 会红（它自己钉着这个前提），不会静默变瞎。
+      # `fetch-depth` 保持默认的 1：只多取 tag 的引用，不要历史。
       - uses: actions/checkout@v7
+        with:
+          fetch-tags: true
 
       # 不加 setup-node：这些脚本零依赖、只用 fs / path / child_process，
       # 而且**生产上它们跑在 runner 自带的 node 上**（组合动作里没有 setup-node，
