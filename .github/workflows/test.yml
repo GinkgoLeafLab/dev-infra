@@ -1,0 +1,41 @@
+name: test
+
+# 这个仓库装的东西一旦坏掉，**是所有消费仓的门一起坏**，而且多数失效是静默的
+# （判定判反了 → 一个标了「必须测」的 PR 拿到绿检查）。所以这里必须有一条自己的测试。
+#
+# 它跑的是 .github/actions/qa-gate/qa-gate.test.js：既验判定逻辑，
+# 也用源码断言钉住接线的形状（不许加 checkout、按 tag 引用动作、脚本走
+# $GITHUB_ACTION_PATH）。理由逐条写在那份文件里。
+#
+# **这个检查现在还不是必需检查**——那要人去仓库设置里点。没钉之前它只是「看得见」，
+# 不是「拦得住」，别把它当成守卫已经生效了。
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# 不许加 paths / paths-ignore：哪天它被钉成必需检查，被 workflow 级过滤跳过的 PR 上
+# 这个检查根本不会产生，表现为永远 pending、那个 PR 永远合不了。
+# 这条禁令在各消费仓的 test.yml 上是同一条。
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      # 不加 setup-node：这些脚本零依赖、只用 fs / path / child_process，
+      # 而且**生产上它们跑在 runner 自带的 node 上**（组合动作里没有 setup-node，
+      # 加了就要求每个消费仓的 job 多跑一步）。这里也用自带的那个，
+      # 两边才是同一个环境——钉一个这里有、那里没有的版本反而制造了差异。
+      - name: QA 门禁判定
+        run: node .github/actions/qa-gate/qa-gate.test.js
