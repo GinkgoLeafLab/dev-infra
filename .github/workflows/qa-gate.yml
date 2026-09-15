@@ -1,0 +1,128 @@
+name: qa-gate (reusable)
+
+# 把「这个 PR 要不要 QA、这一版过没过」变成一个挂在 PR head SHA 上的必需检查 `qa`。
+# 各仓库只留一个二十来行的 caller，逻辑只有这一份。
+#
+# 调研与取舍见 GinkgoLeafLab/GTO-Trainer 仓的
+# docs/方案/2026-09-评论线自处理与-QA-门禁.md、
+# docs/方案/2026-09-放行检查改用-commit-status.md 与
+# docs/方案/2026-09-跨仓库基础设施复用.md。
+#
+# 和 review-gate 是同一个形状（标签是一次性信号、检查钉在 SHA 上、缺席即拦），
+# 只有一处刻意不同，而且这一处是整份文件的关键：
+#
+#   **review-gate 只在 labeled 时跑，qa-gate 必须每一版都跑。**
+#   因为 `qa` 是必需检查而 QA 本身是可选的——一个不需要 QA 的 PR 上也必须有人报告 `qa`，
+#   否则它会永远停在 "Expected — waiting for status"（GitHub 官方在
+#   「Troubleshooting required status checks」里专门写了这个坑：被跳过的必需检查
+#   停在 Pending，PR 合不了）。所以「不需要 QA」不是「不报告」，而是报告一个
+#   **`success`**，描述里写明「未标记需要 QA」。commit status 没有 `neutral` 那一档。
+#
+# 结论怎么算出来的在 .github/actions/qa-gate/qa-gate.js（判错一次的后果是
+# 「标了必须测的 PR 拿到绿检查」，所以那段逻辑待在有测试钉着的地方，不写在 YAML 里）。
+#
+# ---------------------------------------------------------------------------
+# caller 必须自己提供这三样，**一样都不能搬进来**
+# ---------------------------------------------------------------------------
+#
+# 1. `on: pull_request_target:` 带 `types: [opened, reopened, synchronize, labeled, unlabeled]`
+#    可复用工作流没有自己的触发器，事件永远来自 caller。
+#    **必须是 pull_request_target 不是 pull_request**：前者的定义取自默认分支，
+#    后者能让一个 PR 改写自己那份 caller 来放行自己。
+#    **`synchronize` 一条都不能少**：推了新 commit 就是新 SHA，新 SHA 上必须重新报告一次，
+#    漏报一次那个 PR 就永远停在 "Expected — waiting for status"。
+#    同理 caller 上**不许加 `paths` / `paths-ignore`**。
+#
+# 2. **job 级的 `if:`**（非标签事件全放行，标签事件只认 `qa-` 前缀）
+#    这一条是**账单前提，不是过滤器**：job 级的 if 为 false 时 runner 根本不会起、
+#    不计分钟数（GitHub 员工在官方社区论坛 orgs/community discussion #26456 的原话：
+#    "those workflows never start up a runner, so they do not count towards the
+#    included minutes"，**来源等级低于定价页正文**）。
+#    搬进这份文件就变成「起了 runner 再判断」——功能完全正常，只有账单变了，
+#    而且没有任何症状。别搬。
+#
+# 3. `permissions: { statuses: write, pull-requests: write }` 写在**调用这份文件的那个 job 上**
+#    官方原话："If `jobs.<job_id>.permissions` is not specified in the calling job,
+#    the called workflow will have the default permissions for the `GITHUB_TOKEN`."
+#    以及 "The `GITHUB_TOKEN` permissions passed from the caller workflow can be only
+#    downgraded (not elevated) by the called workflow."
+#    ——所以在这里写 permissions 是没用的：给多了升不上去，给少了反而是降级。
+#    caller 漏写的表现是这个 job 403 变红、检查写不上、PR 被拦住——**失败方向是安全那边**。
+#
+#    **注意这里没有 `contents: read`，也不该有。** 以前各仓那份 qa-gate.yml 第一步是
+#    `actions/checkout`（去取自己仓里的 scripts/qa-gate.js），所以非要这一条不可，
+#    漏了就报 `remote: Repository not found`——指不到权限上，几个仓都为它红过。
+#    脚本跟着组合动作下发之后，这条路上一次 checkout 都不做，那个坑结构性地没有了。
+#    （拉取组合动作本身不走这枚 token：官方 Sharing actions and workflows from your
+#    private repository 原话是 "To allow runners to download these actions, GitHub
+#    passes a scoped installation token to the runner."）
+#    **别把 checkout 加回来**：权限只能降不能升，caller 没给 contents，
+#    加回来会在所有消费仓同时红掉（qa-gate.test.js 的 W4 钉着这条）。
+#
+# 这个 workflow 自己会产生一个 "qa-gate / …" 形状的检查——**那不是必需检查**，
+# ruleset 里要钉的是下面用 API 写出来的那个 `qa`，别钉错。
+# （换成 caller 之后这个 job 的显示名会多一层，正因为钉的不是它，所以不受影响。）
+
+on:
+  workflow_call:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # permissions 不写在这儿，见上面第 3 条。
+    steps:
+      # 判定逻辑与那段脚本都在这个组合动作里，跟着 tag 一起下发。
+      # **按 tag 引用，不能写成 `./.github/actions/qa-gate`**：相对路径是对着**工作区**
+      # 解析的，而这条路上谁都没被 checkout 到工作区里。
+      - id: gate
+        uses: GinkgoLeafLab/dev-infra/.github/actions/qa-gate@v1
+
+      # 钉死 head.sha（脚本里已经写进请求体了）：打标签的同时有人推了新 commit 的话，
+      # 检查落在旧 SHA 上，PR 仍然是拦住的。
+      # **为什么是 commit status 而不是 check run**：**在 GinkgoLeafLab/GTO-Trainer 上
+      # 实测过**——那边的必需检查**不匹配**用 Checks API 现写的 check run
+      # （#67 / #68 上 `review` 与 `qa` 都存在于 head SHA、结论正常，merge box 照样说
+      # 「Expected — Waiting for status to be reported」，而同一个 PR 上 job 产出的
+      # `test` 匹配得上）；换成 commit status 之后 #69 当场变 `clean`。
+      # **原因没查到出处**，官方文档里没有「check run 必须属于某个 workflow run 才算」
+      # 这类说法——别在这上面编一个机制。**别改回去。**
+      #
+      # 路径走环境变量而不是插进 run：这个仓库里其余每一处都这么写，别开一个例外。
+      - name: 在 head SHA 上写 qa commit status
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          BODY: ${{ steps.gate.outputs.body_path }}
+        run: gh api "repos/$REPO/statuses/$SHA" --input "$BODY"
+
+      # qa-passed 是一次性信号不是状态：用掉就摘。留着它，下一版代码上它还挂在那儿
+      # 显示「已经测过了」，而新 SHA 上根本没有这个检查——那是一句假话。
+      # **qa-required 不摘**：那是「这个 PR 属于要测的那一类」这个事实，不随版本变。
+      #
+      # always()：写检查失败也摘。失败时 job 是红的、看得见，而留着标签只会让人
+      # 以为已经放行了；重新打一次标签就是重试。
+      # **这一步留在 job 里、没有搬进组合动作**，而且**是取舍，不是限制**：
+      # 组合动作读不到 `secrets` 上下文（官方 contexts reference 原话
+      # "The `secrets` context is not available for composite actions due to
+      # security reasons."），但同一页**紧接着那一句就给了绕法**——
+      # "If you want to pass a secret to a composite action, you need to do it
+      # explicitly as an input."，也就是把 `GITHUB_TOKEN` 当 input 显式交给一个
+      # **跨仓库的动作**。为两行 `gh api` 扩大那枚 token 的去处不值，所以不做。
+      #
+      # **这条理由写错过两次，方向一模一样：都想把它说成「不可能」。**
+      # 先是「组合动作里的 `always()` 没有官方保证」（metadata-syntax 文档里就有
+      # 组合动作用 `failure()` 的例子），再是「搬不进去」（被上面那句 input 推翻）。
+      # 想搬的人要推翻的是上面那个取舍，**别再找第三条假限制**。
+      #
+      # 走 GITHUB_TOKEN 摘标签不会再触发新的 workflow run（GitHub 文档：events
+      # triggered by the GITHUB_TOKEN will not create a new workflow run），不会绕成环。
+      - name: 摘掉 qa-passed
+        if: always() && steps.gate.outputs.remove_label != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          LABEL: ${{ steps.gate.outputs.remove_label }}
+        run: gh api -X DELETE "repos/$REPO/issues/$PR/labels/$LABEL"

@@ -1,0 +1,71 @@
+name: qa-gate decide
+description: 把 PR 上的 qa-* 标签翻译成一个挂在 head SHA 上的 commit status 请求体
+
+# 这个组合动作只做**判定**，不写检查、不摘标签——那两件事留在
+# .github/workflows/qa-gate.yml 里，理由在那份文件顶部（`always()` 的语义与
+# 步骤顺序在 job 那一层是确定的，而且写检查要 `secrets.GITHUB_TOKEN`，
+# **组合动作根本读不到 secrets 上下文**）。
+#
+# 它存在的全部理由是：判定逻辑是一段**有测试钉着的 node 脚本**，
+# 而脚本必须真的躺在 runner 的磁盘上才跑得起来。可复用工作流本身带不了文件；
+# 组合动作可以——GitHub 会把这个仓库在指定 tag 上的内容取到 runner 上，
+# 路径就是 $GITHUB_ACTION_PATH。所以各消费仓一次 checkout 都不用做，
+# 也就不需要 `contents: read`（那条漏了会报 `Repository not found`，
+# 指不到权限上，各仓都为它红过）。
+#
+# 私有仓的动作要被别的仓库用得到，靠的是本仓 Settings → Actions → General → Access
+# 选 "Accessible from repositories in the 'GinkgoLeafLab' organization"。
+# 官方那一页（Sharing actions and workflows from your private repository）的原话是
+# "You can share an action or reusable workflow with your organization without
+# publishing the action or workflow publicly."——**动作和可复用工作流共用同一个开关**，
+# 所以不需要再为它单独配 PAT。
+
+outputs:
+  body_path:
+    description: 写着 commit status 请求体的文件路径，交给 `gh api --input`
+    value: ${{ steps.decide.outputs.body_path }}
+  remove_label:
+    description: 写完检查之后要摘掉的标签名；不用摘时是空串
+    value: ${{ steps.decide.outputs.remove_label }}
+
+runs:
+  using: composite
+  steps:
+    # 标签名是用户随手填的文本，所以走环境变量进 node，不进 shell。
+    # 判定失败（SHA 不对、标签不是 JSON、事件类型认不得）就非零退出：step 红 →
+    # 这个 SHA 上没有 `qa` → PR 拦住。**失败方向是安全的那一边**，别改成「出错就当免测」。
+    #
+    # **事件类型和「打的是哪个标签」都必须传进去**：`labels` 是 webhook
+    # **事件创建那一刻**的快照，而 `qa-passed` 从被打上到被摘掉隔着一整个 run。
+    # 这个窗口里产生的**任何**事件（推新 commit、补打 `qa-required`、摘掉它）拿到的快照
+    # 里都还带着 `qa-passed`，而 head 可能已经是一个没人测过的新 SHA——照单全收就是
+    # **在那个 SHA 上写 success**，且表面上毫无症状。所以只认「这个事件本身就是在打
+    # `qa-passed`」那一种（判定在 qa-gate.js，有断言钉着）。
+    # 改成在这里用 `gh api` 现读标签**不算修掉**：事件已经发出来了，读到的还是「摘之前」那一份。
+    #
+    # 这里的 github.* 取到的是**消费仓那次事件**：官方原话
+    # "When a reusable workflow is triggered by a caller workflow, the `github` context
+    # is always associated with the caller workflow."
+    #
+    # $GITHUB_ACTION_PATH 是这个动作自己所在的目录，**不是**工作区——
+    # 写成工作区相对路径会指到消费仓那个从没 checkout 过的空目录上（qa-gate.test.js 的 W6）。
+    - id: decide
+      shell: bash
+      env:
+        QA_GATE_SHA: ${{ github.event.pull_request.head.sha }}
+        QA_GATE_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        QA_GATE_EVENT: ${{ github.event.action }}
+        # 非标签事件时 github.event.label 是 null，这里就是空串
+        QA_GATE_LABEL: ${{ github.event.label.name }}
+        # status 的描述只有 140 字符，展开的理由指回这次 run
+        QA_GATE_TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      # node 用 runner 自带的：这个脚本零依赖、只用 fs/path/child_process。
+      # 不加 setup-node 是刻意的——加了就要求每个消费仓的 job 多跑一步，
+      # 而这道门的价值全在「每一版都报告得上」，不在 node 版本。
+      #
+      # `shell: bash` 在组合动作里是 `bash --noprofile --norc -eo pipefail`，
+      # 所以 node 一非零退出，下面那行 echo 就不会执行、body_path 是空的，
+      # 工作流那边的写检查步骤也就跑不了——**拦住，不是放行**。
+      run: |
+        node "$GITHUB_ACTION_PATH/qa-gate.js" > "$RUNNER_TEMP/qa-gate.json"
+        echo "body_path=$RUNNER_TEMP/qa-gate.json" >> "$GITHUB_OUTPUT"
