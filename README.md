@@ -40,13 +40,22 @@
 
 - 脚本只有这一份，各消费仓**不再需要 `scripts/qa-gate.js`**
 - 这条路上**一次 checkout 都不做**，`contents: read` 那个坑结构性地没有了
-- `@v1` 出现两次（caller → 工作流，工作流 → 动作），但两处都在运行时解析同一个 tag，
-  挪 tag 时一起变，不会半新半旧
+- 版本号出现两次（caller → 工作流，工作流 → 动作），而**两处各钉各的**——
+  tag 不移动，所以内层那一行必须写**这个 commit 自己打算被发成的那个 tag**，
+  是个前向引用：合并的那一刻它还不存在，打上 tag 它才解析得开
 
-**代价说清楚**：在 dev-infra 的特性分支上改动作时，那份工作流里写的仍然是 `@v1`，
-也就是**旧的动作**——所以「新动作 + 新工作流」这套接线，在 tag 挪过去之前
-没有任何一条流水线验得到。兜底的是本仓 `.github/workflows/test.yml`：
-判定逻辑和接线形状（不许加 checkout、按 tag 引用、脚本走 `$GITHUB_ACTION_PATH`）
+**这两条混用过一次，代价很大**：`v1.1.0` 的内层写的是 `@v1`（那是「挪 tag」时代
+留下来的写法），而 `v1` 指着组合动作还不存在的那个 commit——**那一版的 qa-gate
+在每个消费仓上都跑不起来**，`qa` 这个必需检查永远停在
+"Expected — waiting for status"，而 `pull_request_target` 取默认分支的定义，
+所以**连来修它的那个 PR 自己也合不了**。`.github/actions/qa-gate/qa-gate.test.js`
+的 W3（必须是完整的 `vX.Y.Z`，不许 `@v1` 这种会动的名字）与 W8
+（这个 tag 如果已经存在，它必须真的含有这个动作）现在钉着这一条，做过变异验证。
+
+**代价说清楚**：在 dev-infra 的特性分支上，那一行指着一个还没打的 tag，
+所以「新动作 + 新工作流」这套接线**在打 tag 之前没有任何一条流水线验得到**。
+兜底的是本仓 `.github/workflows/test.yml`：判定逻辑和接线形状
+（不许加 checkout、按不可变 tag 引用、脚本走 `$GITHUB_ACTION_PATH`）
 都有源码断言钉着，做过变异验证。
 
 ## 前提：私有仓的可复用工作流与动作要显式放行
@@ -90,7 +99,7 @@ jobs:
     permissions:
       statuses: write       # 写 `review` 这个 commit status
       pull-requests: write  # 摘标签
-    uses: GinkgoLeafLab/dev-infra/.github/workflows/review-gate.yml@v1
+    uses: GinkgoLeafLab/dev-infra/.github/workflows/review-gate.yml@v1.2.0
 ```
 
 `qa-gate` 的 caller 多两样，**每一样都不能省**：
@@ -116,7 +125,7 @@ jobs:
     permissions:
       statuses: write       # 写 `qa` 这个 commit status
       pull-requests: write  # 摘 qa-passed 标签
-    uses: GinkgoLeafLab/dev-infra/.github/workflows/qa-gate.yml@v1
+    uses: GinkgoLeafLab/dev-infra/.github/workflows/qa-gate.yml@v1.2.0
 ```
 
 **这里没有 `contents: read`，也不该有**——见上面「为什么有组合动作这一层」。
@@ -134,8 +143,8 @@ jobs:
 ### 按 tag 钉，不要按分支
 
 ```yaml
-uses: GinkgoLeafLab/dev-infra/.github/workflows/review-gate.yml@v1   # ✅
-uses: GinkgoLeafLab/dev-infra/.github/workflows/review-gate.yml@main # ❌
+uses: GinkgoLeafLab/dev-infra/.github/workflows/review-gate.yml@v1.2.0 # ✅
+uses: GinkgoLeafLab/dev-infra/.github/workflows/review-gate.yml@main   # ❌
 ```
 
 `@main` 意味着这里一次未经各仓评审的改动**当场在所有仓生效**。
@@ -143,13 +152,19 @@ uses: GinkgoLeafLab/dev-infra/.github/workflows/review-gate.yml@main # ❌
 
 ## 改这里的东西之后
 
-1. 在这个仓库走 PR、评审、合并
-2. **把 tag 挪到新的 commit 上**（或者打一个新 tag），否则各仓库仍然在用旧的那一版。
-   **这一步是人做的**（agent 在这个环境里打不了 tag，会拿到 403）
-3. 各仓库不需要改任何文件——除非 caller 的形状变了（多了 `with:` 之类）
+**tag 不移动，永远是打一个新的。** 这正是「未经各仓评审的改动不会生效」那句话成立的
+原因：升级只能靠改各仓 caller 里那一行 `uses:`，而那一行要在各仓被评审。
 
-**顺序反了会红一片**：消费仓的 caller 先合、tag 后挪，那些 caller 指向的是还没有
-对应内容的 `@v1`，job 当场失败。所以永远是**先挪 tag，再合 caller**。
+1. 在这个仓库走 PR、评审、合并。**改 qa-gate 时，PR 里就要把
+   `.github/workflows/qa-gate.yml` 内层那一行 `uses:` 改成这次要发的版本号**——
+   那一行就是「该打哪个 tag」的唯一真相
+2. **在合并后的 commit 上打那个 tag。** 照着上面那一行写的版本号打，别另想一个。
+   **这一步是人做的**（agent 在这个环境里打不了 tag，会拿到 403）
+3. 各仓库把自己 caller 里的 `uses:` 升到新版本，走各自的 PR 与评审
+
+**顺序反了会红一片**：消费仓的 caller 先合、tag 后打，那些 caller 指向一个不存在的
+版本，job 当场失败——而 `pull_request_target` 取默认分支的定义，所以那之后
+**每个 PR 都撞同一件事，包括来修它的那个**。所以永远是**先打 tag，再合 caller**。
 
 ## 这里放什么、不放什么
 

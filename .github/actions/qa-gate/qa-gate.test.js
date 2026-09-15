@@ -268,9 +268,18 @@ for (const [name, env] of BAD) {
     /^on:\n\s*workflow_call:/m.test(wf));
   ok("W2 正对照：这份工作流里确实有 `uses:` 这种写法（下面 W3 的模式不是凭空的）",
     /^\s*uses: /m.test(wf));
-  ok("W3 **它按 tag 引用同仓的组合动作**——不能是 `./` 相对路径（被调用方所在的仓库" +
-     "根本没被 checkout 到工作区，相对路径会指到 caller 的空工作区上），也不能是 `@main`",
-    /uses: GinkgoLeafLab\/dev-infra\/\.github\/actions\/qa-gate@v\d+\b/.test(wf));
+  /* W3 的模式**必须是完整的 `vX.Y.Z`**，不能只要求 `@v\d+`。
+
+     这不是收紧了一点点：这条断言最早写成 `@v\d+\b` 时，本仓的 tag 策略还是
+     「挪 `v1`」，那时 `@v1` 是对的。策略换成**不可变 tag** 之后这一行没跟着改，
+     于是 `v1.1.0` 带着 `@v1` 发了出去，而 `v1` 指着动作还不存在的那个 commit——
+     那一版的 qa-gate 在每个消费仓上都跑不起来，`qa` 永远停在
+     "Expected — waiting for status"，**连来修它的那个 PR 自己也合不了**。
+     **守卫跟不上策略变更，比没有守卫更糟**：它绿着，看起来这件事有人管。 */
+  ok("W3 **它按不可变 tag 引用同仓的组合动作**——不能是 `./` 相对路径（被调用方所在的" +
+     "仓库根本没被 checkout 到工作区，相对路径会指到 caller 的空工作区上），" +
+     "不能是 `@main`，**也不能是 `@v1` 这种会动的名字**",
+    /uses: GinkgoLeafLab\/dev-infra\/\.github\/actions\/qa-gate@v\d+\.\d+\.\d+\s*$/m.test(wf));
   ok("W4 **这条路上不许有 checkout**——权限取自 caller 且只能降不能升，" +
      "caller 没给 `contents`，加了会在所有消费仓同时以 `Repository not found` 红掉",
     !/actions\/checkout@/.test(wf));
@@ -281,6 +290,60 @@ for (const [name, env] of BAD) {
     /node "\$GITHUB_ACTION_PATH\/qa-gate\.js"/.test(act));
   ok("W7 组合动作确实是 composite（不是 node20 那种，它没有 bundler）",
     /^\s*using: ["']?composite["']?\s*$/m.test(act));
+
+  /* W8 补的是 W3 看不见的那一半：W3 只验**引用的形状**，验不了**那个 tag 上到底有没有
+     这个动作**——今天这个失效正是从这条缝里漏过去的（`@v1` 形状合法、内容没有）。
+
+     判据故意是「**已经存在的** tag 必须含有这个动作」，而不是「这个 tag 必须存在」：
+     正常的发布流程里这一行是**前向引用**（合并时 tag 还没打，见 README），
+     要求它存在会让每个 PR 都红。所以这条拦的是「引用了一个已经发出去、
+     而且内容对不上的旧 tag」——也就是今天这一次。
+
+     **说准它拦不住什么**：拼错一个还不存在的版本号（`v1.2.O`、`v1.20`）它看不见，
+     那一条靠的是发布流程本身——README 写明「内层 `uses:` 写的是哪个 tag 就打哪个」，
+     人照着那一行打 tag，打错就是当场跑不起来、看得见。
+
+     **「这个 tag 本地没有」有两种完全不同的原因，必须分开，不许合成一条。**
+     第一版就是合成一条的，而且**它在 CI 里恒为跳过**——`actions/checkout` 默认
+     `fetch-tags: false`，工作副本里一个 tag 都没有，于是 W8 每次都走「前向引用」
+     那条分支，**还把这句假话打出来**（`v1` 明明存在）。评审在 dev-infra#3 上抓到的：
+     按 CI 的取法重做变异，退回 `@v1` 时只有 W3 红，而 W8 独占的那条路径
+     （形状合法、内容没有）一次都没被覆盖。
+     **守卫绿着、还宣称自己在看——那正是这个 PR 要修的那个形状，它自己犯了一遍。**
+
+     所以现在分三种：
+     - **一个 tag 都没有** → **红**，并说清是取法的问题。有了 `fetch-tags: true`
+       这种状态就不该出现，谁把它拿掉，这条当场响
+     - **有 tag、但没有这一个** → 前向引用，跳过。**这时那句话才是真的**
+     - **不是 git 仓库 / 没有 git** → 跳过并说明，这是唯一一种真的验不了的情况 */
+  const ref = (wf.match(/uses: GinkgoLeafLab\/dev-infra\/\.github\/actions\/qa-gate@(\S+)/) || [])[1];
+  const root = path.join(dir, "..");   /* dir 是 .github/，再上一层是仓库根 */
+  const git = (args) => require("child_process")
+    .spawnSync("git", ["-C", root, ...args], { encoding: "utf8" });
+  const inRepo = git(["rev-parse", "--git-dir"]).status === 0;
+  const anyTag = inRepo && (git(["tag", "-l"]).stdout || "").trim() !== "";
+  const known = ref && inRepo && git(["rev-parse", "--verify", "--quiet", `refs/tags/${ref}`]).status === 0;
+
+  if (!ref) {
+    ok("W8 前提：读得出内层引用的那个 tag", false);
+  } else if (!inRepo) {
+    /* 唯一一种真的验不了的情况：没有 git，或者这份代码不是从仓库里来的 */
+    console.log(`  · W8 跳过：这儿不是 git 仓库（或没有 git），验不了 tag \`${ref}\` 的内容`);
+  } else if (!anyTag) {
+    ok("W8 前提：**本地取到了 tag**——一个都没有说明 checkout 没带 tag 下来" +
+       "（`actions/checkout` 默认 `fetch-tags: false`），那样 W8 会把每一次都当成" +
+       "「前向引用」放过去，**包括引用了一个真实存在、但内容对不上的旧 tag**。" +
+       "修法是给 checkout 加 `fetch-tags: true`，不是把这条改绿",
+      false);
+  } else if (!known) {
+    /* 有 tag 但没有这一个 —— 到这儿「前向引用」才是一句真话 */
+    console.log(`  · W8 跳过：tag \`${ref}\` 还不存在（前向引用，发布时才打）`);
+  } else {
+    const tree = git(["ls-tree", "--name-only", ref, ".github/actions/qa-gate/"]).stdout || "";
+    ok(`W8 **内层引用的 tag \`${ref}\` 上真的有这个组合动作**——` +
+       "形状合法不等于内容对得上，`v1.1.0` 引用 `@v1` 时就是形状全绿、内容根本没有",
+      /action\.yml/.test(tree));
+  }
 }
 
 
