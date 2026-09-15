@@ -165,7 +165,8 @@ for (const [name, bad] of [["超一个字符", "x".repeat(DESC_MAX + 1)], ["空�
 
 /* 上面那几条只验得动 `checkDesc` **自己**。**产出请求体的那条路走不走它，是另一件事**——
    把 `description: checkDesc(d.desc)` 改成 `description: d.desc`，上面全部照旧全绿（评审实测）。
-   这正是仓库里 C40e 那一跪d的形状：变异做了、也红了，红的却是不会出事的那条路径。
+   这正是 GinkgoLeafLab/GTO-Trainer 的 .claude/rules/code-reviewer.md 里记着的 C40e
+   那一跪的形状：变异做了、也红了，红的却是不会出事的那条路径。
 
    所以扫源码钉住调用点。**边界要说清**：扫的是 `qa-gate.js` 全文、**不剥注释**，
    而且断言的是「恰好一次」——所以注释里再写一遍这个模式会让它红。这是刻意的：
