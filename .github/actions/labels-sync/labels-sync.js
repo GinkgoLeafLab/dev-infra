@@ -105,11 +105,13 @@ function validateManifest(labels) {
     } else if (charLen(l.description) > DESC_MAX) {
       /* 按码点数，不按 s.length（UTF-16 码元数）。中文在 BMP 里两者相等，
          **差别只出在 emoji 这类星平面字符上**（一个 emoji 占 2 个码元）。
-         写成 s.length 的话，一串 emoji 明明没超 100 个字却被拦下。 */
-      problems.push(at + "（" + name + "）的 description 超过 " + DESC_MAX + " 字：" + charLen(l.description));
+         官方只写了 "Must be 100 characters or fewer"，**没写按哪种口径数**——
+         查不到，所以这里取码点。取错方向的后果是**可见的**：
+         真超了 API 会 422，而 422 会进 errors、给出退出码 2，不会静默。 */
+      problems.push(at + "（" + name + "）的 description 超过 " + DESC_MAX
+        + " 个字符：" + charLen(l.description));
     }
   });
-
   return problems;
 }
 
