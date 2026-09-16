@@ -3,9 +3,9 @@ name: test
 # 这个仓库装的东西一旦坏掉，**是所有消费仓的门一起坏**，而且多数失效是静默的
 # （判定判反了 → 一个标了「必须测」的 PR 拿到绿检查）。所以这里必须有一条自己的测试。
 #
-# 它跑的是 .github/actions/qa-gate/qa-gate.test.js：既验判定逻辑，
-# 也用源码断言钉住接线的形状（不许加 checkout、按 tag 引用动作、脚本走
-# $GITHUB_ACTION_PATH）。理由逐条写在那份文件里。
+# 它跑两个套件——qa-gate 与 labels-sync 各一份：既验各自的判定/同步逻辑，
+# 也用源码断言钉住接线的形状（不许加 checkout、按不可变 tag 引用动作、脚本与清单走
+# $GITHUB_ACTION_PATH）。理由逐条写在那两份文件里。
 #
 # **这个检查现在还不是必需检查**——那要人去仓库设置里点。没钉之前它只是「看得见」，
 # 不是「拦得住」，别把它当成守卫已经生效了。
@@ -46,5 +46,12 @@ jobs:
       # 而且**生产上它们跑在 runner 自带的 node 上**（组合动作里没有 setup-node，
       # 加了就要求每个消费仓的 job 多跑一步）。这里也用自带的那个，
       # 两边才是同一个环境——钉一个这里有、那里没有的版本反而制造了差异。
+      # 两个套件分开跑、都跑：用 `&&` 串起来的话前面挂了后面**根本不执行**，
+      # 而终端看上去就是「测试挂了」，没人知道另一半整轮没被验过
+      # （GinkgoLeafLab/GTO-Trainer 的 scripts/test-all.js 顶部记着这次真实事故）。
       - name: QA 门禁判定
         run: node .github/actions/qa-gate/qa-gate.test.js
+
+      - name: 标签同步
+        if: always()
+        run: node .github/actions/labels-sync/labels.test.js

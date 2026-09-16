@@ -1,0 +1,4 @@
+[
+  { "name": "qa-required", "color": "ff6460", "description": "这个 PR 属于必须过 QA 的那一类（不是「已经测过了」）" },
+  { "name": "qa-passed", "color": "0e8a16", "description": "QA 通过的一次性信号：qa-gate 拿它在 head SHA 上写 qa 检查，然后自己摘掉" }
+]
