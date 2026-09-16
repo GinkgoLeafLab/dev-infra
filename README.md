@@ -7,7 +7,9 @@
 |---|---|---|
 | `.github/workflows/review-gate.yml` | 可复用工作流 | caller 调它 |
 | `.github/workflows/qa-gate.yml` | 可复用工作流 | caller 调它 |
+| `.github/workflows/labels-sync.yml` | 可复用工作流 | caller 调它 |
 | `.github/actions/qa-gate/` | 组合动作 + 判定脚本 + 它的测试 | **不直接用**，由上面那份工作流调 |
+| `.github/actions/labels-sync/` | 组合动作 + 同步脚本 + 它的测试 + **共享的标签清单** | **不直接用**，由上面那份工作流调 |
 | `.github/workflows/test.yml` | 本仓自己的测试 | 不适用 |
 
 取舍见 `GinkgoLeafLab/GTO-Trainer` 的 `docs/方案/2026-09-跨仓库基础设施复用.md`。
@@ -39,6 +41,9 @@
 路径是 `$GITHUB_ACTION_PATH`。所以现在：
 
 - 脚本只有这一份，各消费仓**不再需要 `scripts/qa-gate.js`**
+- **`labels-sync` 连数据也跟着走**：`labels.json` / `labels.qa.json` 和脚本一起下发。
+  各仓因此连标签清单都不再各存一份——这是这套机制唯一一处共享的不是逻辑而是**数据**，
+  单独说清楚见下面「这里放什么、不放什么」
 - 这条路上**一次 checkout 都不做**，`contents: read` 那个坑结构性地没有了
 - 版本号出现两次（caller → 工作流，工作流 → 动作），而**两处各钉各的**——
   tag 不移动，所以内层那一行必须写**这个 commit 自己打算被发成的那个 tag**，
@@ -128,7 +133,46 @@ jobs:
     uses: GinkgoLeafLab/dev-infra/.github/workflows/qa-gate.yml@v1.2.0
 ```
 
-**这里没有 `contents: read`，也不该有**——见上面「为什么有组合动作这一层」。
+`labels-sync` 的 caller 又是另一个形状，**两处差异都正好是会写错的地方**：
+
+```yaml
+name: labels-sync
+on:
+  # 清单不在这个仓里了，所以这个仓的日常 push 不改变该同步什么。
+  # 真正会改变结果的只有两件事：caller 里 `uses:` 的版本号变了，
+  # 以及 dev-infra 那份清单变了——后者这个仓观察不到，见下面那段。
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/labels-sync.yml
+  workflow_dispatch:
+permissions: {}
+jobs:
+  sync:
+    permissions:
+      issues: write   # 建标签、改标签。**不是** statuses/pull-requests
+    uses: GinkgoLeafLab/dev-infra/.github/workflows/labels-sync.yml@v1.3.0
+    with:
+      # **只有真的装了 qa-gate 的仓才给 true。** 给了 true 却没有 qa-gate，
+      # 等于在这个仓里建两个没有任何东西在读的标签、还给了它们一份正式定义。
+      qa-labels: true
+```
+
+**这条流水线可以用 `paths`**：`test.yml` / `qa-gate.yml` 上那条禁令的理由是
+「必需检查被 workflow 级过滤跳过会停在 `Expected — waiting for status`」，
+而这条**永远不是必需检查、也不在 PR 上跑**。**那个理由不可外推**，
+别拿它去给别的流水线加 `paths`。
+
+**清单改了不会自己传到各仓。** dev-infra 这边改 `labels.json`、打新 tag 之后，
+每个消费仓要么升 caller 里那一行 `uses:`（push 触发，顺带同步），
+要么手动 `workflow_dispatch` 一次。**这是今天的现状，不是疏漏**——
+加一条 `schedule` 能让它自己追上，代价是每个仓每次约一分钟 Actions 时间，
+要不要加由各仓自己定。
+
+**三份 caller 都没有 `contents: read`，也都不该有**——见上面「为什么有组合动作这一层」。
+`permissions` 三份各不相同（`review-gate` / `qa-gate` 要
+`statuses: write` + `pull-requests: write`，`labels-sync` 要 `issues: write`），
+**照着自己那一份抄，别抄隔壁那份**。
 
 ### caller 里那三样必须留在 caller
 
@@ -172,5 +216,6 @@ uses: GinkgoLeafLab/dev-infra/.github/workflows/review-gate.yml@main   # ❌
 |---|---|
 | `on: workflow_call` 的可复用工作流 | **任何凭据**：token、密钥、`.env`、证书 |
 | 组合动作，以及它们要跑的脚本**和那些脚本的测试** | 只对某一个仓库成立的逻辑——那属于那个仓库 |
+| **共享的数据清单**（`labels.json` / `labels.qa.json`）——判据是「各仓应该完全一致」。标签就是这样：名字是跨系统契约（issue 表单、caller 的 `if`、各仓 CLAUDE.md 都按名字引用），各存一份的结果是静默漂开 | **某个仓才需要的那一份数据**。一旦某个仓需要自己的清单，它就不属于这里——`qa-*` 单独一份而不是塞进基础清单，就是这条边界的第一次生效 |
 | | **只对某一个仓库成立的「事实」**：具体 PR 号当现象引用、某个仓的文件路径、某个仓才有的约定。这里的注释会被所有仓读到，写成「在 X 上实测过」而不是「在这个仓库实测过」 |
 | | issue / PR 模板（那是 `.github` 仓的活，机制完全不同） |
