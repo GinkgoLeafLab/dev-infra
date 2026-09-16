@@ -312,8 +312,12 @@ for (const [name, env] of BAD) {
     for (const line of src.split("\n")) {
       const bare = line.trim();
       const indent = line.length - line.trimStart().length;
-      /* 块标量的后续行：缩进比键更深就仍是它的值（块标量里没有注释，`#` 也是正文） */
-      if (cur && bare !== "" && indent > cur.indent) { cur.text += "\n" + line; continue; }
+      /* 块标量的后续行：**空行也算它的内容**，只有「非空且缩进 ≤ 键」才结束它。
+         （`>-` 里空行是段落分隔、`|` 里空行就是空行，都是合法正文；块标量里也没有注释，
+         `#` 同样是正文。）**写成 `bare !== ""` 会让空行当场关掉这个字段**，
+         于是空行之后那几段整个跑到守卫外面——第一段抓得到、后面抓不到，
+         而注释还写着「后续行算它的值」。那是最难发现的一种半盖。 */
+      if (cur && (bare === "" || indent > cur.indent)) { cur.text += "\n" + line; continue; }
       flush();
       if (bare === "" || bare.startsWith("#")) continue;
       const key = (bare.match(/^([A-Za-z_-]+):/) || [])[1];
