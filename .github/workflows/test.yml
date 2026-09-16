@@ -73,3 +73,22 @@ jobs:
       - name: 纯文档判定（shared/）
         if: always()
         run: node shared/docs-only.test.js
+
+      # **vendor-infra 那两份在这里只验语法，不跑真套件，这是刻意的。**
+      # 它的测试里有一条断言要对**真的这个仓库**跑一次 check()，而这个仓是
+      # shared/ 的来处、不是消费者：没有 vendor/infra/VERSION，那一条会当场抛。
+      # 真套件在各消费仓的 npm test 里跑（它们同步过去之后就有了）。
+      #
+      # 那条断言**不许改成「有清单才验」**来迁就这里——那样一个消费仓弄丢清单之后
+      # 它会静默跳过，正是这整套东西要挡住的失效方式。
+      #
+      # 语法检查不是摆设：推上来一份解析不了的 vendor-infra.js，会让**每一个**消费仓的
+      # 下一次 sync 当场坏掉，而这里在合并那一刻就看得见。
+      # 两条各写一步：串起来的话前面挂了后面根本不执行，和上面那几步同一个理由。
+      - name: 同步机制本身（shared/，只验语法）
+        if: always()
+        run: node --check shared/vendor-infra.js
+
+      - name: 同步机制的测试（shared/，只验语法）
+        if: always()
+        run: node --check shared/vendor-infra.test.js
