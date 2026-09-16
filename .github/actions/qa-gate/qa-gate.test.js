@@ -288,6 +288,138 @@ for (const [name, env] of BAD) {
   ok("W6 **组合动作跑的是跟着它一起下发的那份脚本**（`$GITHUB_ACTION_PATH`）——" +
      "写成工作区相对路径会指到 caller 那个没 checkout 过的空目录上",
     /node "\$GITHUB_ACTION_PATH\/qa-gate\.js"/.test(act));
+  /* 清单里「不许出现表达式」的那几个字段，**按键路径切，不按字节位置切**。
+
+     判据来自 runner 自己的清单 schema（`actions/runner` 的
+     `src/Runner.Worker/action_yaml.json`）：**定义里带 `context` 的才允许表达式**。
+
+     | 键路径 | 能写表达式吗 |
+     |---|---|
+     | 顶层 `name` / `description` | **不能** |
+     | `inputs.*.description` | **不能**（v1.3.0 死在这儿）|
+     | `outputs.*.description` | **不能** |
+     | `inputs.*.default` | 能（`input-default-context` 含 `github`；`actions/checkout` 的 `repository` 就是这么写的）|
+     | `outputs.*.value` | 能（`output-value`）|
+     | `runs:` 整段 | 能 |
+
+     **第一版是按「`outputs:` / `runs:` 之前」切窗口的，两个方向都错了一格**：
+     `outputs.*.description` 非法却在窗口外（漏判），`inputs.*.default` 合法却在窗口里（误伤）。
+     位置和合法性本来就不是一回事，所以这里老老实实跟着键路径走。 */
+  function bannedRegions(src) {
+    const out = [];
+    let section = "top", item = null, cur = null;
+    const flush = () => { if (cur) { out.push(cur); cur = null; } };
+    for (const line of src.split("\n")) {
+      const bare = line.trim();
+      const indent = line.length - line.trimStart().length;
+      /* 块标量的后续行：**空行也算它的内容**，只有「非空且缩进 ≤ 键」才结束它。
+         （`>-` 里空行是段落分隔、`|` 里空行就是空行，都是合法正文；块标量里也没有注释，
+         `#` 同样是正文。）**写成 `bare !== ""` 会让空行当场关掉这个字段**，
+         于是空行之后那几段整个跑到守卫外面——第一段抓得到、后面抓不到，
+         而注释还写着「后续行算它的值」。那是最难发现的一种半盖。 */
+      if (cur && (bare === "" || indent > cur.indent)) { cur.text += "\n" + line; continue; }
+      flush();
+      if (bare === "" || bare.startsWith("#")) continue;
+      const key = (bare.match(/^([A-Za-z_-]+):/) || [])[1];
+      if (indent === 0) {
+        if (key === "inputs" || key === "outputs" || key === "runs") { section = key; item = null; continue; }
+        section = "top"; item = null;
+        if (key === "name" || key === "description") cur = { path: key, indent, text: line };
+        continue;
+      }
+      if (section !== "inputs" && section !== "outputs") continue;   /* runs: 整段放行 */
+      if (indent === 2) { item = bare.replace(/:.*$/, ""); continue; }
+      /* 只禁 description；default（inputs）与 value（outputs）是合法的表达式位置 */
+      if (key === "description") cur = { path: section + "." + item + ".description", indent, text: line };
+    }
+    flush();
+    return out;
+  }
+
+  /* W9：上面那张表里「不能」的那几格，一格都不许出现表达式。
+     **labels-sync 那份的 v1.3.0 真的这么坏过**（三个消费仓一起红，
+     `Unrecognized named-value: 'github'` → `Failed to load … action.yml`）；
+     这一份今天是干净的，这条是防它变成第二个。
+     注意这份清单**没有 `inputs:` 段**（输入全走 env），被禁的两类是
+     顶层 `description` 与 `outputs.*.description`。 */
+  {
+    const EXPR = "${" + "{";   /* 拆开写，免得这份文件自己被同一条规则扫出来 */
+    const regions = bannedRegions(act);
+    const paths = regions.map(r => r.path);
+    ok("W9 正对照：顶层 description 被切出来了", paths.includes("description"));
+    ok("W9 正对照：outputs.*.description 被切出来了（实际切到：" + paths.join(" / ") + "）",
+       paths.some(x => /^outputs\..+\.description$/.test(x)));
+    ok("W9 反向对照：outputs.*.value 是合法位置，不许被当成被禁字段",
+       !paths.some(x => /\.value$/.test(x)));
+      /* ---- 合成夹具：**别只喂那两份真清单** ----
+
+         上面那个 `bare === ""` 分支，**只喂真清单是执行不到的**：两份清单里没有一个
+         被禁字段是「块标量 + 空行」（`inputs.qa-labels.description` 是 `>-`，但一个空行都没有）。
+         所以在这几条合成夹具之前，把那一行换回 `bare !== "" &&` **不会有任何东西变红**——
+         这个函数连着三轮各出一个洞，而三轮的洞恰好都是真清单不会踩到的形状。
+         **那不是「测试还能更全」，是这条守卫自己的回归是绿的。**
+
+         验收判据，自查得了：**把上面那一行换回 `bare !== "" && indent > cur.indent`，
+         下面这三条里必须有红的。** 换回去还是全绿，就说明夹具没落在那条路径上。 */
+      const hit = (yaml) => bannedRegions(yaml).filter(r => r.text.includes(EXPR)).map(r => r.path).join(" / ");
+      /* 被禁的一侧：表达式写在块标量**空行之后**那一段，仍要算进这个字段 */
+      const F_BANNED =
+        "name: x\n" +
+        "description: y\n" +
+        "inputs:\n" +
+        "  foo:\n" +
+        "    description: >-\n" +
+        "      第一段\n" +
+        "\n" +
+        "      " + EXPR + " github.repository }}}}\n" +
+        "    required: true\n";
+      /* 顶层 description 与 outputs.*.description 的同一种写法，一次盖两格 */
+      const F_TOP_OUT =
+        "name: x\n" +
+        "description: >-\n" +
+        "  第一段\n" +
+        "\n" +
+        "  " + EXPR + " github.repository }}}}\n" +
+        "outputs:\n" +
+        "  bar:\n" +
+        "    description: |\n" +
+        "      第一段\n" +
+        "\n" +
+        "      " + EXPR + " github.repository }}}}\n" +
+        "    value: ok\n";
+      /* 合法的一侧：同样带空行的块标量，但落在 default / value / runs: 里，**不许被切进来** */
+      const F_LEGAL =
+        "name: x\n" +
+        "description: y\n" +
+        "inputs:\n" +
+        "  foo:\n" +
+        "    default: |\n" +
+        "      第一段\n" +
+        "\n" +
+        "      " + EXPR + " github.repository }}}}\n" +
+        "outputs:\n" +
+        "  bar:\n" +
+        "    description: 说明\n" +
+        "    value: " + EXPR + " steps.x.outputs.y }}}}\n" +
+        "runs:\n" +
+        "  using: composite\n" +
+        "  steps:\n" +
+        "    - shell: bash\n" +
+        "      env:\n" +
+        "        A: " + EXPR + " github.repository }}}}\n" +
+        "      run: echo hi\n";
+      ok("W9 合成夹具：块标量里空行之后那一段仍算这个字段的值（实际抓到：" + hit(F_BANNED) + "）",
+         hit(F_BANNED) === "inputs.foo.description");
+      ok("W9 合成夹具：顶层 description 与 outputs.*.description 的块标量同样盖得住（实际抓到：" + hit(F_TOP_OUT) + "）",
+         hit(F_TOP_OUT) === "description / outputs.bar.description");
+      ok("W9 合成夹具（反向）：default / value / runs: 里的表达式不许被切进来（实际抓到：" + hit(F_LEGAL) + "）",
+         hit(F_LEGAL) === "");
+
+    const bad = regions.filter(r => r.text.includes(EXPR));
+    ok("W9 这几个字段里出现了 " + EXPR + "：" + bad.map(r => r.path).join("、") +
+       "——那些位置没有 github 上下文，整份清单会加载失败", bad.length === 0);
+  }
+
   ok("W7 组合动作确实是 composite（不是 node20 那种，它没有 bundler）",
     /^\s*using: ["']?composite["']?\s*$/m.test(act));
 
