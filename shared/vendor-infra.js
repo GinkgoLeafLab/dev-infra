@@ -10,13 +10,20 @@
    第一次接进一个新仓时手里还没有这份文件，那一次要人工放进来（连同清单），
    之后它就自己管自己了。
 
-   **「自己校验自己」有个边界，说准了别把它当成比实际更强**：有人改这份文件、
-   同时把清单里它那一行的 sha256 也改掉，--check 照样绿。拦住那种改动的不是这里，
-   是评审——它在 diff 里是两处一起动，看得见。这一层挡的是**无意的漂移**，
-   不是有意的绕过。
+   **「自己校验自己」的边界，说准了别把它当成比实际更强。** 这份文件是**唯一的检查者**，
+   所以绕过它**只需要动这一个文件、清单一个字节都不用碰**：把 checkFiles 掏空
+   （开头写一句 return bad）就行，--check 照样打印「OK（N 份）」并且 exit=0——
+   而这时失效的**不是它自己那一行，是全部 N 份一起**。实测过。
 
-   **这一层和 vendor/engine 那一层形状不同，别照抄。** 引擎产物躺在 vendor/engine/ 下，
-   谁要用谁去读；这一层的文件**必须躺在它们各自该在的位置**才会被读到——
+   这条防不住，也加不出防御来：同一份实现自己验自己，这是固有性质，不是缺陷。
+   所以判据只有一条，而且它不依赖读者认出某种 diff 形状：
+   **任何碰 scripts/vendor-infra.js 的 diff，都当成「在拆守卫」来审。**
+
+   这一层真正挡得住的是**无意的漂移**——手改了一份副本、丢了可执行位、
+   忘了某个仓还没跟上。那类才是它存在的理由。
+
+   **这一层的文件不躺在 vendor/ 下，别照着「vendor 一个目录」那种形状去想它。**
+   同步进来的东西**必须躺在它们各自该在的位置**才会被读到——
    scripts/guard-branch.js 由 .claude/settings.json 的 PreToolUse hook 调，
    .githooks/pre-commit 由 git 调，两者都不认 vendor/ 下的副本。
    所以清单记的是**落点路径**，vendor/infra/ 下只有清单本身，没有文件。
@@ -168,8 +175,8 @@ function check(dir = ROOT, file) {
   return checkFiles(v, dir);
 }
 
-/* 直接读 blob，不过 checkout 的 smudge 过滤器——和 vendor-engine.js 同一个理由：
-   那样它就和本机的 core.autocrlf 之类无关，换台机器同步出来的字节完全一样。 */
+/* 直接读 blob，不过 checkout 的 smudge 过滤器：那样它就和本机的 core.autocrlf 之类无关，
+   换台机器同步出来的字节完全一样。 */
 function readBlob(repoDir, relPath, rev = "HEAD") {
   return execFileSync("git", ["-C", repoDir, "cat-file", "blob", rev + ":" + relPath],
     { maxBuffer: 64 * 1024 * 1024 });
