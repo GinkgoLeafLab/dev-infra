@@ -343,26 +343,68 @@ async function main() {
       "L7 **清单也要走 action_path**——写成工作区相对路径会指到 caller 那个没 checkout 过的空目录");
     check(/^\s*using: composite\s*$/m.test(act), "L8 组合动作确实是 composite");
 
-    /* L10：**`runs:` 之前不许出现 `${` + `{` 那种表达式**。
+  /* 清单里「不许出现表达式」的那几个字段，**按键路径切，不按字节位置切**。
 
-       这条不是洁癖，是 v1.3.0 真的这么坏过：`inputs.repository.description` 里写着
-       「通常传 ${'{{'} github.repository }}」，**于是三个消费仓的 labels-sync 全红**，
-       报的是 `Unrecognized named-value: 'github'` +「Failed to load … action.yml」。
+       判据来自 runner 自己的清单 schema（`actions/runner` 的
+       `src/Runner.Worker/action_yaml.json`）：**定义里带 `context` 的才允许表达式**。
 
-       **坏点在于 runner 把清单里的 `description` 也当模板解析**，而那个位置
-       **没有 `github` 上下文**——所以那不是「注释里的一句话」，是整份清单加载失败、
-       一步都跑不到。合法的位置只有 `runs:`（以及 qa-gate 那份的 `outputs.*.value`）。
+       | 键路径 | 能写表达式吗 |
+       |---|---|
+       | 顶层 `name` / `description` | **不能** |
+       | `inputs.*.description` | **不能**（v1.3.0 死在这儿）|
+       | `outputs.*.description` | **不能** |
+       | `inputs.*.default` | 能（`input-default-context` 含 `github`；`actions/checkout` 的 `repository` 就是这么写的）|
+       | `outputs.*.value` | 能（`output-value`）|
+       | `runs:` 整段 | 能 |
 
-       **为什么之前没有任何东西看得见它**：L1~L8 全是形状断言、80 条断言里没有一条
-       按 runner 的方式解析清单，而这条路在 tag 打上、真有仓调用之前跑不到。
-       所以这条守卫补的是「清单自己合不合法」，不是「接线接没接对」。 */
-    const head = act.slice(0, act.search(/^(outputs|runs):/m));
+       **第一版是按「`outputs:` / `runs:` 之前」切窗口的，两个方向都错了一格**：
+       `outputs.*.description` 非法却在窗口外（漏判），`inputs.*.default` 合法却在窗口里（误伤）。
+       位置和合法性本来就不是一回事，所以这里老老实实跟着键路径走。 */
+    function bannedRegions(src) {
+      const out = [];
+      let section = "top", item = null, cur = null;
+      const flush = () => { if (cur) { out.push(cur); cur = null; } };
+      for (const line of src.split("\n")) {
+        const bare = line.trim();
+        const indent = line.length - line.trimStart().length;
+        /* 块标量的后续行：缩进比键更深就仍是它的值（块标量里没有注释，`#` 也是正文） */
+        if (cur && bare !== "" && indent > cur.indent) { cur.text += "\n" + line; continue; }
+        flush();
+        if (bare === "" || bare.startsWith("#")) continue;
+        const key = (bare.match(/^([A-Za-z_-]+):/) || [])[1];
+        if (indent === 0) {
+          if (key === "inputs" || key === "outputs" || key === "runs") { section = key; item = null; continue; }
+          section = "top"; item = null;
+          if (key === "name" || key === "description") cur = { path: key, indent, text: line };
+          continue;
+        }
+        if (section !== "inputs" && section !== "outputs") continue;   /* runs: 整段放行 */
+        if (indent === 2) { item = bare.replace(/:.*$/, ""); continue; }
+        /* 只禁 description；default（inputs）与 value（outputs）是合法的表达式位置 */
+        if (key === "description") cur = { path: section + "." + item + ".description", indent, text: line };
+      }
+      flush();
+      return out;
+    }
+
+    /* L10：上面那张表里「不能」的那几格，一格都不许出现表达式。
+       坏了不是「注释里多一句话」，是**整份清单加载失败、`runs:` 一步都跑不到**
+       （v1.3.0 就是这么让三个消费仓一起红的：`Unrecognized named-value: 'github'`）。
+       L1~L9 全是形状断言，没有一条按 runner 的方式解析清单——这条补的是那个缺口。 */
     const EXPR = "${" + "{";   /* 拆开写，免得这份文件自己被同一条规则扫出来 */
-    check(head.length > 0 && /^inputs:/m.test(head),
-      "L10 正对照：`runs:` 之前确实有内容（`inputs:` 那一段），这条不是扫了个空字符串");
-    check(!head.includes(EXPR),
-      "L10 `runs:` 之前出现了 " + EXPR + " ——清单里的 description 会被 runner 当模板解析，" +
-      "那儿没有 github 上下文，整份清单会加载失败（v1.3.0 就是这么让三个仓一起红的）");
+    const regions = bannedRegions(act);
+    const paths = regions.map(r => r.path);
+    /* 正对照：这份清单里那两类被禁的字段确实都被切出来了，不是扫了个空集合 */
+    check(paths.includes("description"), "L10 正对照：顶层 description 被切出来了");
+    check(paths.some(x => /^inputs\..+\.description$/.test(x)),
+      "L10 正对照：inputs.*.description 被切出来了（实际切到：" + paths.join(" / ") + "）");
+    /* 反向对照：合法的那两格**不许**被切进来，否则这条守卫会拦住正当写法 */
+    check(!paths.some(x => /\.default$/.test(x)),
+      "L10 反向对照：inputs.*.default 是合法位置（runner schema 的 input-default-context 含 github），不许被当成被禁字段");
+    const bad = regions.filter(r => r.text.includes(EXPR));
+    check(bad.length === 0,
+      "L10 这几个字段里出现了 " + EXPR + "：" + bad.map(r => r.path).join("、") +
+      "——那些位置没有 github 上下文，整份清单会加载失败");
 
     /* L9：内层引用的那个 tag 如果**已经存在**，它必须真的含有这个动作。
        判据故意是「已经存在的」而不是「必须存在」：正常发布流程里这一行是前向引用。

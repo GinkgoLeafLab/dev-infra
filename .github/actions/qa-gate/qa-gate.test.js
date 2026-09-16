@@ -288,22 +288,68 @@ for (const [name, env] of BAD) {
   ok("W6 **组合动作跑的是跟着它一起下发的那份脚本**（`$GITHUB_ACTION_PATH`）——" +
      "写成工作区相对路径会指到 caller 那个没 checkout 过的空目录上",
     /node "\$GITHUB_ACTION_PATH\/qa-gate\.js"/.test(act));
-  /* W9：**`outputs:` / `runs:` 之前不许出现 `${` + `{` 那种表达式。**
-     清单里的 `description` 也会被 runner 当模板解析，而那个位置没有 `github`
-     上下文——写进去是整份清单加载失败、一步都跑不到，不是「注释里的一句话」。
-     **labels-sync 那份 v1.3.0 真的这么坏过**（三个消费仓一起红，
-     `Unrecognized named-value: 'github'`）；这一份今天是干净的，
-     这条守卫是防它变成第二个。合法位置只有 `outputs.*.value` 与 `runs:` 里面。 */
+  /* 清单里「不许出现表达式」的那几个字段，**按键路径切，不按字节位置切**。
+
+     判据来自 runner 自己的清单 schema（`actions/runner` 的
+     `src/Runner.Worker/action_yaml.json`）：**定义里带 `context` 的才允许表达式**。
+
+     | 键路径 | 能写表达式吗 |
+     |---|---|
+     | 顶层 `name` / `description` | **不能** |
+     | `inputs.*.description` | **不能**（v1.3.0 死在这儿）|
+     | `outputs.*.description` | **不能** |
+     | `inputs.*.default` | 能（`input-default-context` 含 `github`；`actions/checkout` 的 `repository` 就是这么写的）|
+     | `outputs.*.value` | 能（`output-value`）|
+     | `runs:` 整段 | 能 |
+
+     **第一版是按「`outputs:` / `runs:` 之前」切窗口的，两个方向都错了一格**：
+     `outputs.*.description` 非法却在窗口外（漏判），`inputs.*.default` 合法却在窗口里（误伤）。
+     位置和合法性本来就不是一回事，所以这里老老实实跟着键路径走。 */
+  function bannedRegions(src) {
+    const out = [];
+    let section = "top", item = null, cur = null;
+    const flush = () => { if (cur) { out.push(cur); cur = null; } };
+    for (const line of src.split("\n")) {
+      const bare = line.trim();
+      const indent = line.length - line.trimStart().length;
+      /* 块标量的后续行：缩进比键更深就仍是它的值（块标量里没有注释，`#` 也是正文） */
+      if (cur && bare !== "" && indent > cur.indent) { cur.text += "\n" + line; continue; }
+      flush();
+      if (bare === "" || bare.startsWith("#")) continue;
+      const key = (bare.match(/^([A-Za-z_-]+):/) || [])[1];
+      if (indent === 0) {
+        if (key === "inputs" || key === "outputs" || key === "runs") { section = key; item = null; continue; }
+        section = "top"; item = null;
+        if (key === "name" || key === "description") cur = { path: key, indent, text: line };
+        continue;
+      }
+      if (section !== "inputs" && section !== "outputs") continue;   /* runs: 整段放行 */
+      if (indent === 2) { item = bare.replace(/:.*$/, ""); continue; }
+      /* 只禁 description；default（inputs）与 value（outputs）是合法的表达式位置 */
+      if (key === "description") cur = { path: section + "." + item + ".description", indent, text: line };
+    }
+    flush();
+    return out;
+  }
+
+  /* W9：上面那张表里「不能」的那几格，一格都不许出现表达式。
+     **labels-sync 那份的 v1.3.0 真的这么坏过**（三个消费仓一起红，
+     `Unrecognized named-value: 'github'` → `Failed to load … action.yml`）；
+     这一份今天是干净的，这条是防它变成第二个。
+     注意这份清单**没有 `inputs:` 段**（输入全走 env），被禁的两类是
+     顶层 `description` 与 `outputs.*.description`。 */
   {
-    const head = act.slice(0, act.search(/^(outputs|runs):/m));
     const EXPR = "${" + "{";   /* 拆开写，免得这份文件自己被同一条规则扫出来 */
-    /* 正对照拿 `description:`，**不是 `inputs:`**：这一份清单没有 inputs 段
-       （它的输入全走 env），拿 inputs 当正对照会让这条在基线上就红。 */
-    ok("W9 正对照：`outputs:` 之前确实有内容（顶层 `description:` 那一段），不是扫了个空字符串",
-       head.length > 0 && /^description:/m.test(head));
-    ok("W9 **`outputs:` / `runs:` 之前不许出现 " + EXPR + "**——那儿没有 github 上下文，" +
-       "整份清单会加载失败（labels-sync 的 v1.3.0 就是这么坏的）",
-       !head.includes(EXPR));
+    const regions = bannedRegions(act);
+    const paths = regions.map(r => r.path);
+    ok("W9 正对照：顶层 description 被切出来了", paths.includes("description"));
+    ok("W9 正对照：outputs.*.description 被切出来了（实际切到：" + paths.join(" / ") + "）",
+       paths.some(x => /^outputs\..+\.description$/.test(x)));
+    ok("W9 反向对照：outputs.*.value 是合法位置，不许被当成被禁字段",
+       !paths.some(x => /\.value$/.test(x)));
+    const bad = regions.filter(r => r.text.includes(EXPR));
+    ok("W9 这几个字段里出现了 " + EXPR + "：" + bad.map(r => r.path).join("、") +
+       "——那些位置没有 github 上下文，整份清单会加载失败", bad.length === 0);
   }
 
   ok("W7 组合动作确实是 composite（不是 node20 那种，它没有 bundler）",
