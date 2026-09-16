@@ -11,7 +11,7 @@
    2. **形状校验抓得到那几类错**：颜色带 #、描述超长、重名、首尾空格
    3. **永远不产删除**。这是整个脚本唯一严重的失效方式——删标签会把它从所有
       issue 上摘掉，不可逆（见 labels-sync.js 顶部那段官方原话）
-   4. **写路径**：dy-run 一个写请求都不发；--apply 时 `sev/major` 的斜杠要 encode
+   4. **写路径**：dry-run 一个写请求都不发；--apply 时 `sev/major` 的斜杠要 encode
    5. **接线形状**：清单和脚本都走 $GITHUB_ACTION_PATH，这条路上不许有 checkout */
 const http = require("http");
 const fs = require("fs");
@@ -239,7 +239,7 @@ async function main() {
   }
   {
     /* apply 但没 token：要抛，而且**在发出任何写请求之前**。
-       悄悄退化成 dry-run 是最坯的一种失败：流水线全绿，标签一个没同步。 */
+       悄悄退化成 dry-run 是最坏的一种失败：流水线全绿，标签一个没同步。 */
     const { server, seen, api } = await fakeApi(() => [200, JSON.stringify([])]);
     let threw = false;
     try { await syncLabels({ api, repo: REPO, token: "", apply: true, manifest: [L("a", "000000", "")] }); }
