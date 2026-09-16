@@ -405,6 +405,70 @@ async function main() {
     /* 反向对照：合法的那两格**不许**被切进来，否则这条守卫会拦住正当写法 */
     check(!paths.some(x => /\.default$/.test(x)),
       "L10 反向对照：inputs.*.default 是合法位置（runner schema 的 input-default-context 含 github），不许被当成被禁字段");
+        /* ---- 合成夹具：**别只喂那两份真清单** ----
+
+           上面那个 `bare === ""` 分支，**只喂真清单是执行不到的**：两份清单里没有一个
+           被禁字段是「块标量 + 空行」（`inputs.qa-labels.description` 是 `>-`，但一个空行都没有）。
+           所以在这几条合成夹具之前，把那一行换回 `bare !== "" &&` **不会有任何东西变红**——
+           这个函数连着三轮各出一个洞，而三轮的洞恰好都是真清单不会踩到的形状。
+           **那不是「测试还能更全」，是这条守卫自己的回归是绿的。**
+
+           验收判据，自查得了：**把上面那一行换回 `bare !== "" && indent > cur.indent`，
+           下面这三条里必须有红的。** 换回去还是全绿，就说明夹具没落在那条路径上。 */
+        const hit = (yaml) => bannedRegions(yaml).filter(r => r.text.includes(EXPR)).map(r => r.path).join(" / ");
+        /* 被禁的一侧：表达式写在块标量**空行之后**那一段，仍要算进这个字段 */
+        const F_BANNED =
+          "name: x\n" +
+          "description: y\n" +
+          "inputs:\n" +
+          "  foo:\n" +
+          "    description: >-\n" +
+          "      第一段\n" +
+          "\n" +
+          "      " + EXPR + " github.repository }}}}\n" +
+          "    required: true\n";
+        /* 顶层 description 与 outputs.*.description 的同一种写法，一次盖两格 */
+        const F_TOP_OUT =
+          "name: x\n" +
+          "description: >-\n" +
+          "  第一段\n" +
+          "\n" +
+          "  " + EXPR + " github.repository }}}}\n" +
+          "outputs:\n" +
+          "  bar:\n" +
+          "    description: |\n" +
+          "      第一段\n" +
+          "\n" +
+          "      " + EXPR + " github.repository }}}}\n" +
+          "    value: ok\n";
+        /* 合法的一侧：同样带空行的块标量，但落在 default / value / runs: 里，**不许被切进来** */
+        const F_LEGAL =
+          "name: x\n" +
+          "description: y\n" +
+          "inputs:\n" +
+          "  foo:\n" +
+          "    default: |\n" +
+          "      第一段\n" +
+          "\n" +
+          "      " + EXPR + " github.repository }}}}\n" +
+          "outputs:\n" +
+          "  bar:\n" +
+          "    description: 说明\n" +
+          "    value: " + EXPR + " steps.x.outputs.y }}}}\n" +
+          "runs:\n" +
+          "  using: composite\n" +
+          "  steps:\n" +
+          "    - shell: bash\n" +
+          "      env:\n" +
+          "        A: " + EXPR + " github.repository }}}}\n" +
+          "      run: echo hi\n";
+        check(hit(F_BANNED) === "inputs.foo.description",
+          "L10 合成夹具：块标量里空行之后那一段仍算这个字段的值（实际抓到：" + hit(F_BANNED) + "）");
+        check(hit(F_TOP_OUT) === "description / outputs.bar.description",
+          "L10 合成夹具：顶层 description 与 outputs.*.description 的块标量同样盖得住（实际抓到：" + hit(F_TOP_OUT) + "）");
+        check(hit(F_LEGAL) === "",
+          "L10 合成夹具（反向）：default / value / runs: 里的表达式不许被切进来（实际抓到：" + hit(F_LEGAL) + "）");
+
     const bad = regions.filter(r => r.text.includes(EXPR));
     check(bad.length === 0,
       "L10 这几个字段里出现了 " + EXPR + "：" + bad.map(r => r.path).join("、") +
