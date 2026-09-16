@@ -1,0 +1,69 @@
+name: labels-sync (reusable)
+
+# 把共享的标签清单同步成调用方仓库的 GitHub 标签。
+# 各仓库只留一个二十来行的 caller，清单与逻辑都只有这一份。
+#
+# 调研与取舍见 GinkgoLeafLab/GTO-Trainer 仓的
+# docs/方案/2026-09-标签用清单管理.md 与
+# docs/方案/2026-09-跨仓库基础设施复用.md。
+#
+# **它只加和改，永远不删。** 理由在 .github/actions/labels-sync/labels-sync.js
+# 顶部：删标签会把它从所有 issue 上摘掉，不可逆，而现成的同步工具多数默认就是删的。
+#
+# ---------------------------------------------------------------------------
+# caller 必须自己提供这两样
+# ---------------------------------------------------------------------------
+#
+# 1. `on:` —— 可复用工作流没有自己的触发器，事件永远来自 caller。
+#    **这条流水线可以用 `paths`**（`test.yml` / `qa-gate.yml` 上那条禁令不适用）：
+#    那条禁令的理由是必需检查被 workflow 级过滤跳过会停在
+#    "Expected — waiting for status"，而这条**永远不是必需检查、也不在 PR 上跑**。
+#    **但那个理由不可外推**，别拿它去给别的流水线加 paths。
+#
+# 2. `permissions: { issues: write }` 写在**调用这份文件的那个 job 上**
+#    官方明写权限取自 calling job，被调用方**只能降不能升**，写在这里没用。
+#
+#    **注意这里不要 `contents`。** 清单和脚本都跟着组合动作下发，
+#    这条路上一次 checkout 都不做——和 qa-gate 同形。给了也用不上。
+#
+# 这个 workflow 不写任何 commit status，也不是任何仓的必需检查：
+# 它是一个**动作**，不是一个判断。坏了的表现是标签没同步上，不是 PR 合不了。
+
+on:
+  workflow_call:
+    inputs:
+      qa-labels:
+        description: >-
+          这个仓要不要 qa-required / qa-passed。**只有装了 qa-gate 的仓才给 true**，
+          理由见组合动作的 action.yml。
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # permissions 不写在这儿，见上面第 2 条。
+    steps:
+      # 先 dry-run 打一遍计划：出了问题，日志里看得见「本来要做什么」。
+      # 两步用的是同一个动作、同一份清单，差别只有 apply。
+      - name: 看看要做什么（dry-run）
+        uses: GinkgoLeafLab/dev-infra/.github/actions/labels-sync@v1.3.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          qa-labels: ${{ inputs.qa-labels }}
+          apply: "false"
+
+      # **这一行写的是「这个 commit 打算被发成哪个 tag」，是前向引用**：
+      # 合并的那一刻 tag 还不存在，人在合并后的 commit 上打上它才解析得开。
+      # 必须是完整的 vX.Y.Z，不能是 @v1 这种会动的名字——v1.1.0 就是那么发坏的
+      # （内层引用 @v1，而 v1 上根本没有组合动作）。labels.test.js 的 L3/L9 钉着。
+      - name: 同步
+        uses: GinkgoLeafLab/dev-infra/.github/actions/labels-sync@v1.3.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          qa-labels: ${{ inputs.qa-labels }}
+          apply: "true"

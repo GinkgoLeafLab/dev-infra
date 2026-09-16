@@ -1,0 +1,61 @@
+name: labels-sync
+description: 把共享的标签清单同步成这个仓库的 GitHub 标签。只加和改，永远不删。
+
+# **清单和脚本一起住在这儿，各仓不再各存一份。** 为什么连清单也共享见
+# labels-sync.js 顶部：标签的抽象意义各仓相同，描述措辞的差异只是细节，
+# 而「同一个标签三个仓三种颜色」纯粹是漂移。
+#
+# **这条路上一次 checkout 都不做**，和 qa-gate 一样：要读的两样东西
+# （脚本、清单）都跟着这个动作下发，没有一样在消费仓的工作区里。
+# 所以 caller **不需要 `contents`**，只要 `issues: write`。
+# 谁要是加一个 checkout 回来，先问「它要读消费仓的什么」——今天答案是「没有」。
+
+inputs:
+  token:
+    description: 调用方 job 的 GITHUB_TOKEN。见下面「为什么它是 input」
+    required: true
+  repository:
+    description: owner/repo，通常传 ${{ github.repository }}
+    required: true
+  qa-labels:
+    description: >-
+      这个仓要不要 qa-required / qa-passed 两个标签。
+      **只有真的装了 qa-gate 的仓才该给 true**：把它们建到一个没有 QA 的仓里，
+      等于给两个没有任何东西在读的标签一份正式定义。
+    required: false
+    default: "false"
+  apply:
+    description: "false 只打印计划（dry-run），true 真的建和改"
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    # **token 走 input，不走 secrets 上下文**——官方 contexts reference 原话：
+    # "The `secrets` context is not available for composite actions due to
+    # security reasons."，紧接着给的绕法就是
+    # "If you want to pass a secret to a composite action, you need to do it
+    # explicitly as an input."
+    #
+    # **这和 qa-gate 那边的取舍不同，不是自相矛盾**：那边要用 token 的只有两行
+    # `gh api`，为它扩大 token 的去处不值，所以留在 job 里；这边**脚本本身就是整个
+    # 工作**，把它留在 job 里就等于这个动作什么都不做。同一个判据，两个方向。
+    #
+    # 「job 级 `env` 会不会传进组合动作」**官方没写**（metadata-syntax 与 contexts
+    # 两页都查过，都没有这一条），所以不建在那上面——没写的机制不是机制。
+    - shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        GITHUB_REPOSITORY: ${{ inputs.repository }}
+        QA: ${{ inputs.qa-labels }}
+        APPLY: ${{ inputs.apply }}
+        BASE: ${{ github.action_path }}/labels.json
+        QA_MANIFEST: ${{ github.action_path }}/labels.qa.json
+      # 参数拼在 shell 里而不是插进 run 的文本：inputs 是调用方给的字符串，
+      # 插进命令行就是注入口子。这个仓库其余每一处都这么写。
+      run: |
+        args=(--manifest "$BASE")
+        [ "$QA" = "true" ] && args+=(--manifest "$QA_MANIFEST")
+        [ "$APPLY" = "true" ] && args+=(--apply)
+        node "$GITHUB_ACTION_PATH/labels-sync.js" "${args[@]}"
