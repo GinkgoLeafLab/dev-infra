@@ -24,7 +24,7 @@
 | 仓库 | 装什么 | 名字能不能换 | agent 能不能写 |
 |---|---|---|---|
 | **`.github`**（公开） | issue 表单、PR 模板（GitHub 的「默认社区健康文件」） | **不能**，GitHub 钉死要叫这个名字 | **不能**，只能人手推 |
-| **`dev-infra`**（私有，就是这里） | 可复用工作流 + 组合动作 | 能 | 能，正常走 PR |
+| **`dev-infra`**（公开，就是这里） | 可复用工作流 + 组合动作 | 能 | 能，正常走 PR |
 
 ## 为什么有「组合动作」这一层
 
@@ -63,27 +63,24 @@
 （不许加 checkout、按不可变 tag 引用、脚本走 `$GITHUB_ACTION_PATH`）
 都有源码断言钉着，做过变异验证。
 
-## 前提：私有仓的可复用工作流与动作要显式放行
+## 这个仓库是公开的
 
-官方原话：
+所以各仓的 caller 直接 `uses:` 就行，**不需要配 PAT，也不需要任何放行设置**。
 
-> The called workflow is stored in a private repository and the settings for that repository allow it to be accessed.
+反过来也成立、而且要记住：**任何人都能 `uses:` 这三条可复用工作流。**
+那不构成风险——它们跑在调用方自己的仓库里、用调用方自己的 `GITHUB_TOKEN`，
+碰不到我们的任何东西。**别因为看见这一条就把仓库改回私有。**
 
-**同一个开关同时管动作**——官方那一页标题就叫
-*Sharing actions and workflows from your private repository*，原话：
-
-> You can share an action or reusable workflow with your organization without publishing
-> the action or workflow publicly.
+**万一哪天真的改回私有**（或者照这套东西新建一个私有的共享仓），
+那就必须去 **Settings → Actions → General → Access** 选
+"Accessible from repositories in the 'ORGANIZATION' organization"——
+官方原话，同一个开关同时管可复用工作流与组合动作：
 
 > When you configure this setting, workflows in other repositories that are part of the
 > 'ORGANIZATION NAME' organization can access the actions and reusable workflows in this repository.
 
-所以组合动作不需要另配 PAT。落地是这个仓库的 **Settings → Actions → General → Access**，
-要选 "Accessible from repositories in the 'GinkgoLeafLab' organization"。
-**这一步是人点的，agent 改不了仓库设置。**
-
-漏点的表现：各仓的 gate job 直接失败 → 检查写不上 → PR 被拦住。
-**失败方向是安全那边**（不会静默放行），但会红一片。
+**这一步是人点的，agent 改不了仓库设置。** 漏点的表现：各仓的 gate job 直接失败 →
+检查写不上 → PR 被拦住。**失败方向是安全那边**（不会静默放行），但会红一片。
 
 ## 怎么用
 
@@ -152,7 +149,7 @@ jobs:
   sync:
     permissions:
       issues: write   # 建标签、改标签。**不是** statuses/pull-requests
-    uses: GinkgoLeafLab/dev-infra/.github/workflows/labels-sync.yml@v1.3.0
+    uses: GinkgoLeafLab/dev-infra/.github/workflows/labels-sync.yml@v1.4.0
     with:
       # **只有真的装了 qa-gate 的仓才给 true。** 给了 true 却没有 qa-gate，
       # 等于在这个仓里建两个没有任何东西在读的标签、还给了它们一份正式定义。
