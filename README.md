@@ -139,8 +139,9 @@ jobs:
 name: labels-sync
 on:
   # 清单不在这个仓里了，所以这个仓的日常 push 不改变该同步什么。
-  # 真正会改变结果的只有两件事：caller 里 `uses:` 的版本号变了，
-  # 以及 dev-infra 那份清单变了——后者这个仓观察不到，见下面那段。
+  # **真正会改变结果的只有一件事：下面那一行 `uses:` 的版本号变了。**
+  # 清单是跟着组合动作在那个 tag 上下发的，而 tag 不移动——dev-infra
+  # 那边改了清单，也要等这一行升上去才传得过来。见下面那段。
   push:
     branches: [main]
     paths:
@@ -163,11 +164,19 @@ jobs:
 而这条**永远不是必需检查、也不在 PR 上跑**。**那个理由不可外推**，
 别拿它去给别的流水线加 `paths`。
 
-**清单改了不会自己传到各仓。** dev-infra 这边改 `labels.json`、打新 tag 之后，
-每个消费仓要么升 caller 里那一行 `uses:`（push 触发，顺带同步），
-要么手动 `workflow_dispatch` 一次。**这是今天的现状，不是疏漏**——
-加一条 `schedule` 能让它自己追上，代价是每个仓每次约一分钟 Actions 时间，
-要不要加由各仓自己定。
+**清单改了不会自己传到各仓，而且只有一条路传得过去：升 caller 里那一行 `uses:`。**
+caller 钉的是 `…/workflows/labels-sync.yml@vX.Y.Z`，那个 tag 上的工作流内层又钉着
+`…/actions/labels-sync@vX.Y.Z`，而清单**跟着组合动作在那个 tag 上**下发
+（`action.yml` 里 `BASE: ${{ github.action_path }}/labels.json`）。tag 不移动，
+所以**不升版本号就永远是那份旧清单**——`workflow_dispatch` 是这样，`schedule` 也是这样
+（它追的始终是自己钉着的那个 tag，追不上一个更新的清单）。
+
+**走错这条路是绿的**：run 成功，dry-run 那一步照常打印一份「没什么要做」的计划，
+没有任何东西会说它算的是旧清单。
+
+`workflow_dispatch` 仍然留着，但它的用途是另一件事：**把有人在网页上手改出的偏差，
+按当前钉着的那份清单对回来。**（同理，想定期对偏差就加 `schedule`，
+代价约一分钟 Actions 时间——但它买到的是纠偏，不是追新清单。）
 
 **三份 caller 都没有 `contents: read`，也都不该有**——见上面「为什么有组合动作这一层」。
 `permissions` 三份各不相同（`review-gate` / `qa-gate` 要
