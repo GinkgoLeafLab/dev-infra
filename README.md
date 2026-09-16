@@ -10,7 +10,7 @@
 | `.github/workflows/labels-sync.yml` | 可复用工作流 | caller 调它 |
 | `.github/actions/qa-gate/` | 组合动作 + 判定脚本 + 它的测试 | **不直接用**，由上面那份工作流调 |
 | `.github/actions/labels-sync/` | 组合动作 + 同步脚本 + 它的测试 + **共享的标签清单** | **不直接用**，由上面那份工作流调 |
-| `shared/` | **第二层的源文件**：必须躺在各仓里才会被读到的那几份脚本与它们的测试 | 各仓 `node scripts/vendor-infra.js --sync <tag>` 拉过去，落在自己的 `scripts/` 下 |
+| `shared/` | **第二层的源文件**：必须躺在各仓里才会被读到的那几份脚本与它们的测试 | 各仓 `node scripts/vendor-infra.js --sync <tag>` 拉过去。**落点按清单逐份记**，不是统一放一个目录：脚本落 `scripts/`，`pre-commit` 落 `.githooks/` |
 | `.github/workflows/test.yml` | 本仓自己的测试，连同 `shared/` 里那些套件 | 不适用 |
 
 取舍见 `GinkgoLeafLab/GTO-Trainer` 的 `docs/方案/2026-09-跨仓库基础设施复用.md`。
@@ -231,9 +231,23 @@ uses: GinkgoLeafLab/dev-infra/.github/workflows/review-gate.yml@main   # ❌
 `guard-branch.js` 由各仓的 `.claude/settings.json`（PreToolUse hook）和
 `.githooks/pre-commit` 调用，那两条路读不到别的仓库。
 
-所以这一层**有副本**，而这里是副本的唯一来处：各仓 `vendor/infra/VERSION`
-记着每一份的 sha256，`node scripts/vendor-infra.js --check` 在那个仓的 `npm test`
-里对一遍。手改各仓那份副本 → 那个仓的测试红。
+所以这一层**有副本**，而这里是副本的唯一来处。
+
+**机制还没落地。** `vendor-infra.js` 与各仓的 `vendor/infra/VERSION` 都还不存在，
+在下一个 PR。**在那之前 `shared/` 只是来处，没有任何东西拦得住有人手改某个仓的副本。**
+别把下面这段读成今天的现状。
+
+机制落地之后是这样：各仓 `vendor/infra/VERSION` 逐份记着
+**落点路径 + 来处 + sha256 + 文件模式**，`node scripts/vendor-infra.js --check`
+在那个仓的 `npm test` 里对一遍，手改副本 → 那个仓的测试红。
+
+**「文件模式」是单独一项，不是多余的**：sha256 只比内容，**永远比不到可执行位**。
+而 `.githooks/pre-commit` 少了那一位，git 直接跳过、**不报任何错**。
+所以那一位必须由清单载着、由 `--sync` 显式打上、由 `--check` 对着查——
+靠源文件自己的模式传不过去（`fs.writeFileSync` 新建出来的文件本来就不带它）。
+**这个仓库里 `shared/pre-commit` 就是 `100644`**：推它用的 GitHub Contents API
+一律写 100644，而这套工具里没有能设模式的口子。这不影响正确性，但它正是
+「模式得单独记一项」的现实理由——写在这儿免得下一个人以为源文件的模式会自己传下去。
 
 **判据和「共享的数据清单」那条一样：各仓应该完全一致的才放这儿。**
 所以这些文件里不许出现只对某一个仓成立的东西——具体路径、某个仓的流水线清单、
