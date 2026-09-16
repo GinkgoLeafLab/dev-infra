@@ -288,6 +288,24 @@ for (const [name, env] of BAD) {
   ok("W6 **组合动作跑的是跟着它一起下发的那份脚本**（`$GITHUB_ACTION_PATH`）——" +
      "写成工作区相对路径会指到 caller 那个没 checkout 过的空目录上",
     /node "\$GITHUB_ACTION_PATH\/qa-gate\.js"/.test(act));
+  /* W9：**`outputs:` / `runs:` 之前不许出现 `${` + `{` 那种表达式。**
+     清单里的 `description` 也会被 runner 当模板解析，而那个位置没有 `github`
+     上下文——写进去是整份清单加载失败、一步都跑不到，不是「注释里的一句话」。
+     **labels-sync 那份 v1.3.0 真的这么坏过**（三个消费仓一起红，
+     `Unrecognized named-value: 'github'`）；这一份今天是干净的，
+     这条守卫是防它变成第二个。合法位置只有 `outputs.*.value` 与 `runs:` 里面。 */
+  {
+    const head = act.slice(0, act.search(/^(outputs|runs):/m));
+    const EXPR = "${" + "{";   /* 拆开写，免得这份文件自己被同一条规则扫出来 */
+    /* 正对照拿 `description:`，**不是 `inputs:`**：这一份清单没有 inputs 段
+       （它的输入全走 env），拿 inputs 当正对照会让这条在基线上就红。 */
+    ok("W9 正对照：`outputs:` 之前确实有内容（顶层 `description:` 那一段），不是扫了个空字符串",
+       head.length > 0 && /^description:/m.test(head));
+    ok("W9 **`outputs:` / `runs:` 之前不许出现 " + EXPR + "**——那儿没有 github 上下文，" +
+       "整份清单会加载失败（labels-sync 的 v1.3.0 就是这么坏的）",
+       !head.includes(EXPR));
+  }
+
   ok("W7 组合动作确实是 composite（不是 node20 那种，它没有 bundler）",
     /^\s*using: ["']?composite["']?\s*$/m.test(act));
 

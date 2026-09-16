@@ -15,7 +15,9 @@ inputs:
     description: 调用方 job 的 GITHUB_TOKEN。见下面「为什么它是 input」
     required: true
   repository:
-    description: owner/repo，通常传 ${{ github.repository }}
+    # **别在这行里写 ${…} 形式的表达式**，理由见 labels.test.js 的 L10：
+    # 清单里的 description 也会被 runner 当模板解析，而那儿没有 github 上下文。
+    description: owner/repo。caller 那边传的是 github.repository
     required: true
   qa-labels:
     description: >-

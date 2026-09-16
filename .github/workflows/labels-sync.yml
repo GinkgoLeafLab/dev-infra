@@ -49,7 +49,7 @@ jobs:
       # 先 dry-run 打一遍计划：出了问题，日志里看得见「本来要做什么」。
       # 两步用的是同一个动作、同一份清单，差别只有 apply。
       - name: 看看要做什么（dry-run）
-        uses: GinkgoLeafLab/dev-infra/.github/actions/labels-sync@v1.3.0
+        uses: GinkgoLeafLab/dev-infra/.github/actions/labels-sync@v1.4.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           repository: ${{ github.repository }}
@@ -61,7 +61,7 @@ jobs:
       # 必须是完整的 vX.Y.Z，不能是 @v1 这种会动的名字——v1.1.0 就是那么发坏的
       # （内层引用 @v1，而 v1 上根本没有组合动作）。labels.test.js 的 L3/L9 钉着。
       - name: 同步
-        uses: GinkgoLeafLab/dev-infra/.github/actions/labels-sync@v1.3.0
+        uses: GinkgoLeafLab/dev-infra/.github/actions/labels-sync@v1.4.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           repository: ${{ github.repository }}

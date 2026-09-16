@@ -11,7 +11,7 @@
    2. **形状校验抓得到那几类错**：颜色带 #、描述超长、重名、首尾空格
    3. **永远不产删除**。这是整个脚本唯一严重的失效方式——删标签会把它从所有
       issue 上摘掉，不可逆（见 labels-sync.js 顶部那段官方原话）
-   4. **写路径**：dry-run 一个写请求都不发；--apply 时 `sev/major` 的斜杠要 encode
+   4. **写路径**：dy-run 一个写请求都不发；--apply 时 `sev/major` 的斜杠要 encode
    5. **接线形状**：清单和脚本都走 $GITHUB_ACTION_PATH，这条路上不许有 checkout */
 const http = require("http");
 const fs = require("fs");
@@ -239,7 +239,7 @@ async function main() {
   }
   {
     /* apply 但没 token：要抛，而且**在发出任何写请求之前**。
-       悄悄退化成 dry-run 是最坏的一种失败：流水线全绿，标签一个没同步。 */
+       悄悄退化成 dry-run 是最坯的一种失败：流水线全绿，标签一个没同步。 */
     const { server, seen, api } = await fakeApi(() => [200, JSON.stringify([])]);
     let threw = false;
     try { await syncLabels({ api, repo: REPO, token: "", apply: true, manifest: [L("a", "000000", "")] }); }
@@ -342,6 +342,27 @@ async function main() {
     check(/\$\{\{ github\.action_path \}\}\/labels\.json/.test(act),
       "L7 **清单也要走 action_path**——写成工作区相对路径会指到 caller 那个没 checkout 过的空目录");
     check(/^\s*using: composite\s*$/m.test(act), "L8 组合动作确实是 composite");
+
+    /* L10：**`runs:` 之前不许出现 `${` + `{` 那种表达式**。
+
+       这条不是洁癖，是 v1.3.0 真的这么坏过：`inputs.repository.description` 里写着
+       「通常传 ${'{{'} github.repository }}」，**于是三个消费仓的 labels-sync 全红**，
+       报的是 `Unrecognized named-value: 'github'` +「Failed to load … action.yml」。
+
+       **坏点在于 runner 把清单里的 `description` 也当模板解析**，而那个位置
+       **没有 `github` 上下文**——所以那不是「注释里的一句话」，是整份清单加载失败、
+       一步都跑不到。合法的位置只有 `runs:`（以及 qa-gate 那份的 `outputs.*.value`）。
+
+       **为什么之前没有任何东西看得见它**：L1~L8 全是形状断言、80 条断言里没有一条
+       按 runner 的方式解析清单，而这条路在 tag 打上、真有仓调用之前跑不到。
+       所以这条守卫补的是「清单自己合不合法」，不是「接线接没接对」。 */
+    const head = act.slice(0, act.search(/^(outputs|runs):/m));
+    const EXPR = "${" + "{";   /* 拆开写，免得这份文件自己被同一条规则扫出来 */
+    check(head.length > 0 && /^inputs:/m.test(head),
+      "L10 正对照：`runs:` 之前确实有内容（`inputs:` 那一段），这条不是扫了个空字符串");
+    check(!head.includes(EXPR),
+      "L10 `runs:` 之前出现了 " + EXPR + " ——清单里的 description 会被 runner 当模板解析，" +
+      "那儿没有 github 上下文，整份清单会加载失败（v1.3.0 就是这么让三个仓一起红的）");
 
     /* L9：内层引用的那个 tag 如果**已经存在**，它必须真的含有这个动作。
        判据故意是「已经存在的」而不是「必须存在」：正常发布流程里这一行是前向引用。
