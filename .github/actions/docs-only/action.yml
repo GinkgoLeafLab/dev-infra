@@ -1,0 +1,82 @@
+name: docs-only decide
+description: 判断一次改动是不是「纯文档」，输出 docs_only 给后面的步骤当条件
+
+# 这个组合动作只做**判定**，跳不跳过什么由调用方自己用 `if:` 决定——
+# 哪几步该跳是各仓的事（跑测试、部署、校验部署配置各不相同），
+# 判定这件事所有仓一模一样。
+#
+# **它和这个仓库里另外两个组合动作的形状不一样，别照着那两个的假设读它：**
+#
+# | | qa-gate / labels-sync | 这一个 |
+# |---|---|---|
+# | 谁 `uses:` 它 | 只有本仓的可复用工作流 | **各消费仓的 workflow 直接用** |
+# | 要不要调用方 checkout | 不要，全程不碰工作区 | **要**，见下面那条 |
+#
+# **它在调用方的工作区里跑 `git diff`**，所以用它的那个 job 必须先
+# `actions/checkout` 且 `fetch-depth: 0`——浅克隆里 base 那个对象根本不存在。
+# 忘了不会静默判错：`docs-only.js` 取不到 base 就打 ::warning:: 并输出
+# `docs_only=false`，也就是照常跑测试。**失败方向永远是「跑测试」那一边。**
+#
+# 脚本怎么到 runner 上：GitHub 把这个仓库在指定 tag 上的内容取过去，
+# 路径是 $GITHUB_ACTION_PATH。**不要写成工作区相对路径**——那会指到调用方的仓库里，
+# 那儿从来没有这份文件（这正是把它搬过来的原因）。
+
+inputs:
+  base:
+    description: diff 的起点 SHA（PR 用 base.sha，推送用 event.before）
+    required: true
+  head:
+    description: diff 的终点 SHA（PR 用 head.sha，推送用 github.sha）
+    required: true
+  merge_base:
+    # 名字用下划线不是连字符：`${{ inputs.merge-base }}` 在表达式里会被当成减法，
+    # 要写成 inputs['merge-base'] 才对。这种一眼看不出来的坑不值得留着。
+    description: >-
+      传 "true" 走三点 diff。PR 的改动要相对**分叉点**算，否则 base 分支自己往前走一步，
+      别人的改动就会被算进这个 PR；推送到主干是两点 diff，不传这个。
+      **认不出的值一律按两点 diff**——那一边算进来的文件只多不少，
+      也就是更容易判成「不是纯文档」，仍然落在「跑测试」那一侧。
+    required: false
+    default: ""
+  skipped:
+    description: >-
+      只改那条 ::notice:: 里「跳过了什么」的措辞（例如「npm test 与内测部署」），
+      **判定逻辑不受它影响**。不传就是默认的「npm test」。
+    required: false
+    default: ""
+
+outputs:
+  docs_only:
+    description: '"true" / "false"。判定失败时是 "false"，也就是照常跑测试'
+    value: ${{ steps.decide.outputs.docs_only }}
+
+runs:
+  using: composite
+  steps:
+    # 四个值全部走环境变量进 node，**一个都不拼进 shell**：SHA 来自事件 payload、
+    # skipped 是人随手填的中文文本，拼进命令行就是注入口子，而且中文与空格会被词分割。
+    #
+    # node 用 runner 自带的：这个脚本零依赖、只用 fs / child_process。
+    # 不加 setup-node 是刻意的——加了就要求每个消费仓的 job 多跑一步，
+    # 而这道判定的价值不在 node 版本上。
+    #
+    # docs_only 是 docs-only.js 自己 append 进 $GITHUB_OUTPUT 的
+    # （组合动作里那是**这一步自己的**输出文件），所以这里不用再 echo 一遍。
+    - id: decide
+      shell: bash
+      env:
+        DOCS_ONLY_BASE: ${{ inputs.base }}
+        DOCS_ONLY_HEAD: ${{ inputs.head }}
+        DOCS_ONLY_MERGE_BASE: ${{ inputs.merge_base }}
+        DOCS_ONLY_SKIPPED: ${{ inputs.skipped }}
+      # 用数组拼参数、不用字符串：`--skipped=npm test 与内测部署` 里有空格，
+      # 拼成字符串再展开会被切成三个参数，判定当场看不见 --skipped。
+      run: |
+        args=("$DOCS_ONLY_BASE" "$DOCS_ONLY_HEAD")
+        if [ "$DOCS_ONLY_MERGE_BASE" = "true" ]; then
+          args+=("--merge-base")
+        fi
+        if [ -n "$DOCS_ONLY_SKIPPED" ]; then
+          args+=("--skipped=$DOCS_ONLY_SKIPPED")
+        fi
+        node "$GITHUB_ACTION_PATH/docs-only.js" "${args[@]}"
