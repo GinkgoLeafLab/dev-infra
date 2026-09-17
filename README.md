@@ -10,6 +10,7 @@
 | `.github/workflows/labels-sync.yml` | 可复用工作流 | caller 调它 |
 | `.github/actions/qa-gate/` | 组合动作 + 判定脚本 + 它的测试 | **不直接用**，由上面那份工作流调 |
 | `.github/actions/labels-sync/` | 组合动作 + 同步脚本 + 它的测试 + **共享的标签清单** | **不直接用**，由上面那份工作流调 |
+| `.github/actions/docs-only/` | 组合动作 + 纯文档判定 + 它的测试 | **各仓的 workflow 直接 `uses:` 它**，当成一个步骤用 |
 | `shared/` | **第二层的源文件**：必须躺在各仓里才会被读到的那几份脚本与它们的测试 | 各仓 `node scripts/vendor-infra.js --sync <tag>` 拉过去。**落点按清单逐份记**，不是统一放一个目录：脚本落 `scripts/`，`pre-commit` 落 `.githooks/` |
 | `.github/workflows/test.yml` | 本仓自己的测试，连同 `shared/` 里那些套件 | 不适用 |
 
@@ -55,6 +56,16 @@
 - 版本号出现两次（caller → 工作流，工作流 → 动作），而**两处各钉各的**——
   tag 不移动，所以内层那一行必须写**这个 commit 自己打算被发成的那个 tag**，
   是个前向引用：合并的那一刻它还不存在，打上 tag 它才解析得开
+
+**组合动作有两种用法，别把第二种当成第一种读。** `qa-gate` 与 `labels-sync`
+只被本仓的可复用工作流调，各仓看不见它们；`docs-only` 是**各仓的 workflow 直接
+`uses:` 的一个步骤**——判定完各仓自己用 `if:` 决定跳过哪几步，而「跳哪几步」逐仓不同
+（跑测试、部署、校验部署配置），判定这件事所有仓一模一样。
+
+跟着这种用法来的还有一条：**`docs-only` 要调用方先 checkout，而且 `fetch-depth: 0`**。
+它在调用方的工作区里跑 `git diff`，浅克隆里 base 那个对象根本不存在。
+忘了不会静默判错——取不到 base 就打 `::warning::` 并输出 `docs_only=false`，
+也就是照常跑测试。**这一层的失败方向永远是「跑测试」那一边。**
 
 **这两条混用过一次，代价很大**：`v1.1.0` 的内层写的是 `@v1`（那是「挪 tag」时代
 留下来的写法），而 `v1` 指着组合动作还不存在的那个 commit——**那一版的 qa-gate
@@ -187,6 +198,46 @@ caller 钉的是 `…/workflows/labels-sync.yml@vX.Y.Z`，那个 tag 上的工�
 `statuses: write` + `pull-requests: write`，`labels-sync` 要 `issues: write`），
 **照着自己那一份抄，别抄隔壁那份**。
 
+### `docs-only` 不是 caller，是一个步骤
+
+上面三份都是「caller 调一条可复用工作流」。`docs-only` 是另一种形状：
+**各仓在自己已有的 job 里，把它当一个步骤用**，判定完自己决定跳过哪几步。
+
+```yaml
+      - uses: actions/checkout@v7
+        with:
+          # 判定要 diff base 和 head 两个 commit，浅克隆里 base 根本不存在。
+          # **这一行是前提，不是优化。**
+          fetch-depth: 0
+
+      - name: 判断是不是纯文档改动
+        id: scope
+        uses: GinkgoLeafLab/dev-infra/.github/actions/docs-only@v1.7.0
+        with:
+          base: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          head: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          # PR 的改动要相对**分叉点**算（三点 diff），否则 base 分支自己往前走一步，
+          # 别人的改动就会被算进这个 PR。推送到主干是两点 diff。
+          merge-base: ${{ github.event_name == 'pull_request' }}
+          # 只改那条 ::notice:: 的措辞，判定逻辑不受它影响。不给就是「npm test」。
+          skipped: npm test 与内测部署
+
+      - run: npm ci
+        if: steps.scope.outputs.docs_only != 'true'
+      - run: npm test
+        if: steps.scope.outputs.docs_only != 'true'
+```
+
+三条容易写错的：
+
+- **跳过的是 job 里的步骤，不是 job**，更不是 `paths` / `paths-ignore`。
+  `test` 那条是必需检查，被 workflow 级过滤跳过的 PR 上这个检查根本不会产生，
+  表现为永远 pending、那个 PR 永远合不了。这条禁令在各仓的 `test.yml` 上是同一条
+- **这个 job 要 checkout，所以它确实需要 `contents: read`**——
+  上面那句「三份 caller 都没有 `contents: read`」说的是那三份 caller，别推广到这里
+- **判定绿了不代表那件事做了。** 跳过时它会在检查页上打一条 `::notice::` 说明这一点，
+  各仓的 `skipped:` 就是那句话里的宾语，写准它
+
 ### caller 里那三样必须留在 caller
 
 搬进被调用的那份文件，**每一样的失效都是静默的**：
@@ -226,11 +277,16 @@ uses: GinkgoLeafLab/dev-infra/.github/workflows/review-gate.yml@main   # ❌
 ## `shared/`：第二层的源文件
 
 这里面装的是**必须躺在各消费仓里才会被读到的可执行文本**——今天是分支守卫
-（连同它的 `pre-commit` 钩子）、纯文档判定、装 hook 那个脚本、**同步机制自己**，
+（连同它的 `pre-commit` 钩子）、装 hook 那个脚本、**同步机制自己**，
 以及**它们各自的测试**。
-它们没法做成组合动作：
-`guard-branch.js` 由各仓的 `.claude/settings.json`（PreToolUse hook）和
-`.githooks/pre-commit` 调用，那两条路读不到别的仓库。
+它们没法做成组合动作，判据是**谁在调它**：这几份的调用方都是各仓本地的一条路径——
+`guard-branch.js` 由 `.claude/settings.json`（PreToolUse hook）与 `.githooks/pre-commit`
+调用，`setup-hooks.js` 由 `npm prepare` 调用，`vendor-infra.js` 是把这一切拉进来的
+那一下——**那几条路都读不到别的仓库**。
+
+反过来也是同一条判据：**只被 CI 的 `run:` 调用的东西不属于这一层**，
+它做得成组合动作。`docs-only` 原来在这儿，正是按这条判据搬走的
+（`qa-gate.js` 更早一步，各仓现在连那个文件都没有了）。
 
 所以这一层**有副本**，而这里是副本的唯一来处。
 

@@ -185,7 +185,7 @@ function readBlob(repoDir, relPath, rev = "HEAD") {
 /* **-z 不是可选的。** git 默认把非 ASCII 路径输出成 "shared/\346\226\260.js"
    这种带引号的八进制转义形式，于是同一个文件在清单里和在这儿长得不一样，
    「上游多了一份」会被误判成真的多了一份、而且报出来的名字人也认不出。
-   这条和 shared/docs-only.js 里 changedFiles 用 -z 是同一个理由，
+   这条和 .github/actions/docs-only/docs-only.js 里 changedFiles 用 -z 是同一个理由，
    那边的注释写着「路径里有一个中文字符就够了」。 */
 function listSource(repoDir, rev = "HEAD") {
   const out = execFileSync("git",

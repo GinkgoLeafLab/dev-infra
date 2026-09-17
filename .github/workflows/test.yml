@@ -3,10 +3,11 @@ name: test
 # 这个仓库装的东西一旦坏掉，**是所有消费仓的门一起坏**，而且多数失效是静默的
 # （判定判反了 → 一个标了「必须测」的 PR 拿到绿检查）。所以这里必须有一条自己的测试。
 #
-# 它跑两类套件，清单以下面的 steps 为准。一类是第一层的（qa-gate 与 labels-sync）：
-# 既验各自的判定/同步逻辑，
-# 也用源码断言钉住接线的形状（不许加 checkout、按不可变 tag 引用动作、脚本与清单走
-# $GITHUB_ACTION_PATH）。理由逐条写在那两份文件里。
+# 它跑两类套件，清单以下面的 steps 为准。一类是第一层的（qa-gate、labels-sync
+# 与 docs-only）：既验各自的判定/同步逻辑，
+# 也把接线本身验一遍（不许加 checkout、按不可变 tag 引用动作、脚本与清单走
+# $GITHUB_ACTION_PATH；docs-only 那份是把 action.yml 里那段 run 抽出来真跑一遍）。
+# 理由逐条写在那三份文件里。
 #
 # 另一类是 `shared/` 里第二层那几份源文件自带的测试。各消费仓同步过去之后**也会跑**
 # （那几份 *.test.js 是跟着一起同步的，落在各仓自己的套件清单里），
@@ -63,16 +64,18 @@ jobs:
         if: always()
         run: node .github/actions/labels-sync/labels.test.js
 
+      # 这一条会在临时目录里 git init 一个真仓库、真的提交几次——
+      # `-z` 与 `--no-renames` 那两条只有拿真 git 跑才测得出来，纯函数测不到。
+      # 它还会把 action.yml 里那段 run 抽出来用 bash 跑一遍（各仓 workflow 里
+      # 只剩一行 `uses:`，参数是那段 bash 拼的，拼错了没有一个仓看得见）。
+      - name: 纯文档判定
+        if: always()
+        run: node .github/actions/docs-only/docs-only.test.js
+
       # 下面跑的是 shared/ 里那几份源文件自己的测试。
       - name: 分支守卫（shared/）
         if: always()
         run: node shared/guard-branch.test.js
-
-      # 这一条会在临时目录里 git init 一个真仓库、真的提交几次——
-      # `-z` 与 `--no-renames` 那两条只有拿真 git 跑才测得出来，纯函数测不到。
-      - name: 纯文档判定（shared/）
-        if: always()
-        run: node shared/docs-only.test.js
 
       # **vendor-infra 那两份在这里只验语法，不跑真套件，这是刻意的。**
       # 它的测试里有一条断言要对**真的这个仓库**跑一次 check()，而这个仓是

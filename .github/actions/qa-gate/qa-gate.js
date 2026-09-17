@@ -9,7 +9,7 @@
 
    **为什么判定在这儿而不在 workflow 的 YAML 里**：它判错一次的后果不是「CI 红了」，
    而是**一个标了「必须测」的 PR 拿到绿的必需检查**——表面上一切正常，检查绿着、合得掉。
-   这种东西必须待在有测试钉着的地方（各仓的 `scripts/docs-only.js` 是同一个理由），
+   这种东西必须待在有测试钉着的地方（隔壁的 `docs-only` 动作是同一个理由），
    而钉着它的是同目录下的 `qa-gate.test.js`，由本仓的 `.github/workflows/test.yml` 跑。
 
    **`decide()` 判三态，`STATE` 才压成 commit status 的两态**：免测与通过都落到

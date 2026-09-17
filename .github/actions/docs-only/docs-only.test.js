@@ -1,7 +1,7 @@
-/* 纯文档判定的回归测试：node scripts/docs-only.test.js
+/* 纯文档判定的回归测试：node .github/actions/docs-only/docs-only.test.js
 
-   **这份文件是从 GinkgoLeafLab/dev-infra 同步进来的，不要手改。**
-   改它去那边走 PR、打 tag，再回来 `node scripts/vendor-infra.js --sync <tag>`。
+   跟着组合动作走，**不同步进任何消费仓**——它验的是这份判定本身，
+   而判定只有这一份。各仓那边该有的是另一种测试，见本文件末尾那段。
 
    这段代码判错一次的后果不是「测试红了」，而是**一版没跑过测试的代码拿到绿的必需检查**，
    所以它的边界要钉死，尤其是这两条：
@@ -13,11 +13,14 @@
    - **重命名。** 少了 --no-renames，「src/x.js 改名成 docs/x.md」只会看到目标路径，
      被误判成纯文档改动
 
-   **下面那张表只放通用的路径类别。** 某个仓想钉住自己那几类路径（vendor 进来的产物、
-   数据集、语言包……），**另开一份本仓自己的测试文件**，别往这张表里加——
-   加了这份文件就和共享那份漂开，完整性校验会红。
-   那种本仓专属的用例值得写，但它护的是另一件事：**防白名单朝本仓自己那几类路径扩张**
-   （通用用例抓不到「有人往白名单里加了 vendor/」，本仓那一行抓得到）。 */
+   **下面那张表只放通用的路径类别**，别往里加某个仓才有的路径（vendor 进来的产物、
+   数据集、语言包……）：这份表所有仓共用，写进来的仓库专属路径对别的仓毫无意义。
+
+   **代价要说清楚，别当它不存在**：判定搬成组合动作之后，消费仓里没有这份实现了，
+   那边**写不出「拿真的 isDocsOnly 判一遍本仓这几类路径」的测试**。
+   照着白名单在那个仓里重写一遍规则**更糟**——那是第二处真相，会静默漂开。
+   所以「白名单朝某个仓的路径扩张」这件事，拦它的地方从「那个仓的测试当场红」
+   变成了**那个仓升 `uses:` 版本号时的那一次评审**。弱了一档，但它是有人看的一档。 */
 const { execFileSync } = require("child_process");
 const fs = require("fs");
 const os = require("os");
@@ -44,7 +47,7 @@ const CASES = [
   ["源码",                       ["src/app.js"],                           false],
   ["文档 + 一个源码",            ["docs/部署.md", "src/app.js"],            false],
   ["测试本身",                   ["test.js"],                              false],
-  ["判定脚本自己",               ["scripts/docs-only.js"],                 false],
+  ["判定脚本自己",               [".github/actions/docs-only/docs-only.js"], false],
   ["workflow",                   [".github/workflows/test.yml"],           false],
   ["本地 hook 与权限配置",        [".claude/settings.json"],                false],
   ["构建脚本",                   ["scripts/build.js"],                     false],
@@ -142,6 +145,105 @@ check("--skipped 不影响判定结果", custom.value, "true");
 check("--skipped 不会被当成 base/head", cli(dir, ["--skipped=x", mainTip, prHead, "--merge-base"]).value, "true");
 /* 不是纯文档时一条 notice 都不该有——那句话只在「跳过了」的时候才成立 */
 check("不是纯文档就没有 notice", /::notice::/.test(cli(dir, [mainTip, prHead]).stdout), false);
+
+/* —— 组合动作那一层：把 action.yml 里那段 run 原样跑一遍 ——
+   各仓 workflow 里只剩一行 `uses:`，**参数是这段 bash 拼的**，
+   所以拼错了没有任何一个仓看得见。这里跑的是从 action.yml 里**抽出来的**那段文本，
+   不是照抄一份——照抄的那份改了 YAML 也不会红。
+
+   为什么值得跑而不是 grep 几个关键字：踩过的坑是「`"${args[@]}"` 掉了引号」，
+   那时 `--skipped=npm test 与内测部署` 会被词分割成三个参数，
+   判定结果一个字都不变、只有那条 notice 从「已跳过 npm test 与内测部署」变成
+   「已跳过 npm」——**grep 关键字看不见这种，跑一遍看得见**（做过变异验证）。 */
+function extractRun() {
+  const text = fs.readFileSync(path.join(__dirname, "action.yml"), "utf8");
+  const lines = text.split("\n");
+  const i = lines.findIndex((l) => /^\s*run:\s*\|\s*$/.test(l));
+  if (i < 0) throw new Error("action.yml 里找不到 `run: |`");
+  const keyIndent = lines[i].match(/^\s*/)[0].length;
+  const body = [];
+  let blockIndent = null;
+  for (let j = i + 1; j < lines.length; j++) {
+    if (lines[j].trim() === "") { body.push(""); continue; }
+    const ind = lines[j].match(/^\s*/)[0].length;
+    if (ind <= keyIndent) break;
+    if (blockIndent === null) blockIndent = ind;
+    body.push(lines[j].slice(blockIndent));
+  }
+  return body.join("\n");
+}
+const RUN_BODY = extractRun();
+
+/* action.yml 的 env 那几行**跑不到**：下面那几条是自己塞 DOCS_ONLY_* 环境变量的
+   （runner 上那一步才是 `${{ inputs.x }}` 展开出来的）。所以引用了一个没声明的
+   input 这件事，执行验不到——GitHub 那边它会安静地展开成空串，
+   表现是「--skipped 或 --merge-base 悄悄失效」，判定照常绿。这里单独对一遍。 */
+function actionYaml() {
+  return fs.readFileSync(path.join(__dirname, "action.yml"), "utf8");
+}
+const DECLARED = (() => {
+  const text = actionYaml();
+  const i = text.indexOf("\ninputs:\n");
+  const rest = text.slice(i + 1).split("\n").slice(1);
+  const names = [];
+  for (const l of rest) {
+    if (/^\S/.test(l)) break;                       // 到下一个顶层键就停
+    const m = /^  ([A-Za-z][\w-]*):\s*$/.exec(l);
+    if (m) names.push(m[1]);
+  }
+  return names;
+})();
+const REFERENCED = [...actionYaml().matchAll(/\$\{\{\s*inputs\.([\w-]+)\s*\}\}/g)].map((m) => m[1]);
+/* 两条正对照：解析器抽空了的话下面那条「都声明过」会因为无一可查而空绿。 */
+check("action.yml 里抽得到 inputs 声明", DECLARED.length, 4);
+check("action.yml 里抽得到 inputs 引用", REFERENCED.length, 4);
+check("env 里引用的 input 都声明过",
+  REFERENCED.filter((n) => !DECLARED.includes(n)).join("、"), "");
+
+/* 抽空了的解析器会让下面每一条都变成空跑，而且全绿——先把这件事排除掉。 */
+check("抽得出 action.yml 里那段 run", /node "\$GITHUB_ACTION_PATH\/docs-only\.js"/.test(RUN_BODY), true);
+
+if (process.platform === "win32") {
+  /* 出声地跳过：这个仓的 CI 只有 ubuntu，而这段是 bash（数组语法）。
+     静默跳过才是问题，跳过本身不是。 */
+  console.log("  （组合动作那一层在 Windows 上跳过：需要 bash）");
+} else {
+  const RUN_FILE = path.join(OUT_DIR, "action-run.sh");
+  fs.writeFileSync(RUN_FILE, RUN_BODY);
+  /* 和 runner 上一样：组合动作里的 `shell: bash` 就是这几个参数。 */
+  function act({ base: b, head: h, mergeBase = "", skipped = "" }) {
+    const outFile = path.join(OUT_DIR, "gh_output");
+    fs.writeFileSync(outFile, "");
+    let stdout = "", code = 0;
+    try {
+      stdout = execFileSync("bash", ["--noprofile", "--norc", "-eo", "pipefail", RUN_FILE], {
+        cwd: dir, encoding: "utf8",
+        env: { ...process.env, GITHUB_ACTION_PATH: __dirname, GITHUB_OUTPUT: outFile,
+               DOCS_ONLY_BASE: b, DOCS_ONLY_HEAD: h,
+               DOCS_ONLY_MERGE_BASE: mergeBase, DOCS_ONLY_SKIPPED: skipped },
+      });
+    } catch (e) { code = e.status; stdout = (e.stdout || "") + (e.stderr || ""); }
+    return { value: fs.readFileSync(outFile, "utf8").trim().replace(/^docs_only=/, ""), stdout, code };
+  }
+
+  /* 带空格的中文 --skipped 要原样到达那条 notice——掉了引号这一条就红。 */
+  const spaced = act({ base: mainTip, head: prHead, mergeBase: "true", skipped: "npm test 与内测部署" });
+  check("动作层：带空格的中文 skipped 原样进 notice",
+    /::notice::[^\n]*已跳过 npm test 与内测部署。/.test(spaced.stdout), true);
+  check("动作层：merge_base=true 走三点 diff", spaced.value, "true");
+  check("动作层：退出码是 0", spaced.code, 0);
+
+  /* 认不出的值落在两点 diff 那一侧——也就是「更容易判成不是纯文档」那一侧。
+     这条钉的是失败方向，不是某个具体写法。 */
+  check("动作层：merge_base 认不出的值按两点 diff",
+    act({ base: mainTip, head: prHead, mergeBase: "yes" }).value, "false");
+
+  /* 调用方忘了 fetch-depth: 0 时 base 取不到。**方向必须是「跑测试」并且出声。** */
+  const shallow = act({ base: "0".repeat(40), head: prHead });
+  check("动作层：base 取不到按跑测试处理", shallow.value, "false");
+  check("动作层：base 取不到要出声", /::warning::/.test(shallow.stdout), true);
+  check("动作层：判定失败也不让这一步红", shallow.code, 0);
+}
 
 fs.rmSync(dir, { recursive: true, force: true });
 fs.rmSync(OUT_DIR, { recursive: true, force: true });

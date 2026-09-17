@@ -2,11 +2,18 @@
 /* 判断一次改动是不是「纯文档」——CI 用它决定要不要真跑那些花时间的步骤
    （跑测试、部署、校验部署配置之类）。
 
-   **这份文件是从 GinkgoLeafLab/dev-infra 同步进来的，不要手改。**
-   改它去那边走 PR、打 tag，再回来 `node scripts/vendor-infra.js --sync <tag>`。
-   手改的后果是本仓的完整性断言变红——那是对的那一边，但白费一次。
+   **消费仓不再有这份文件的副本。** 它跟着组合动作 `.github/actions/docs-only`
+   一起下发到 runner 上（路径 `$GITHUB_ACTION_PATH`），各仓的 workflow 里只有一行
+   `uses: GinkgoLeafLab/dev-infra/.github/actions/docs-only@<tag>`。
+   所以改这里就是改了所有仓——**打了新 tag、各仓把那一行升上去之后**。
 
-   用法：node scripts/docs-only.js <base-sha> <head-sha> [--merge-base] [--skipped=<描述>]
+   用法（组合动作替调用方拼好，本地与测试也可以直接这么调）：
+   node docs-only.js <base-sha> <head-sha> [--merge-base] [--skipped=<描述>]
+
+   **它在调用方的工作区里跑 `git diff`**，所以那个 job 必须先 checkout，
+   而且要 `fetch-depth: 0`——浅克隆里 base 那个对象根本不存在。
+   忘了的后果不是判错，是 `hasCommit` 取不到 base → 打 ::warning:: → 按「跑测试」处理
+   （见下面「失败方向」那段）。
 
    --skipped 只改那条 ::notice:: 里「跳过了什么」的措辞，**判定逻辑不受它影响**。
    哪几条流水线在调它、各自跳过了什么，是各仓自己的事，写在各仓的 CI 文档里；
@@ -17,9 +24,9 @@
    那个 PR 就永远合不了。所以 job 照常跑，跳过的是 job 里面那几步，检查每次都会真正变绿。
    调研与出处见 GinkgoLeafLab/GTO-Trainer 仓的 docs/方案/2026-08-文档改动跳过测试.md。
 
-   为什么这段逻辑在 scripts/ 而不是写进 workflow 的 run：
-   多于一行的逻辑不许留在 YAML 里（见 .claude/agents/common/ci-dev.md），
-   而且放到这里它才能被 scripts/docs-only.test.js 钉住——这段代码判错一次的后果，
+   为什么是一段 node 脚本而不是写进 workflow 的 run：
+   多于一行的逻辑不许留在 YAML 里（见各仓的 .claude/agents/common/ci-dev.md），
+   而且写成脚本它才能被 docs-only.test.js 钉住——这段代码判错一次的后果，
    是一版没跑过测试的代码拿到绿的必需检查。
 
    **失败方向是刻意选的：拿不准就跑测试。** 缺 SHA、git 报错、diff 为空、
@@ -33,10 +40,11 @@ const { spawnSync } = require("child_process");
    - docs/ 下的一切
    - 任何位置的 .md：CLAUDE.md、README.md、.claude/ 下的角色与规则都在这儿
 
-   **这两条成立靠一个前提，而那个前提是各仓自己的事，不是这份文件能替谁断言的**：
-   接这份文件的仓库里，没有任何构建或测试去读 docs/ 与 .md，发布件也不含它们。
+   **这两条成立靠一个前提，而那个前提在每个用这个动作的仓里各自成立、各自会坏**：
+   那个仓里没有任何构建或测试去读 docs/ 与 .md，发布件也不含它们。
    哪天某个仓开始拿 docs/ 当测试夹具、或者把某份 .md 打进产物，**这条白名单在那个仓
-   当场作废**，要么收窄、要么那个仓不该用这份判定。接进来的时候核一遍，别默认它成立。
+   当场作废**，要么收窄、要么那个仓不该用这个动作。**这份文件替谁都断言不了这件事**：
+   它下发到所有仓、看不见任何一个仓的构建。第一次接上的时候核一遍，别默认它成立。
 
    刻意不含 .claude/settings.json（它配的是本地 hook 与权限）、.github/ 下的
    **非 .md 文件**（workflow 定义）、.gitignore ——它们不是文档，
