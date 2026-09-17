@@ -173,6 +173,33 @@ function extractRun() {
   return body.join("\n");
 }
 const RUN_BODY = extractRun();
+
+/* action.yml 的 env 那几行**跑不到**：下面那几条是自己塞 DOCS_ONLY_* 环境变量的
+   （runner 上那一步才是 `${{ inputs.x }}` 展开出来的）。所以引用了一个没声明的
+   input 这件事，执行验不到——GitHub 那边它会安静地展开成空串，
+   表现是「--skipped 或 --merge-base 悄悄失效」，判定照常绿。这里单独对一遍。 */
+function actionYaml() {
+  return fs.readFileSync(path.join(__dirname, "action.yml"), "utf8");
+}
+const DECLARED = (() => {
+  const text = actionYaml();
+  const i = text.indexOf("\ninputs:\n");
+  const rest = text.slice(i + 1).split("\n").slice(1);
+  const names = [];
+  for (const l of rest) {
+    if (/^\S/.test(l)) break;                       // 到下一个顶层键就停
+    const m = /^  ([A-Za-z][\w-]*):\s*$/.exec(l);
+    if (m) names.push(m[1]);
+  }
+  return names;
+})();
+const REFERENCED = [...actionYaml().matchAll(/\$\{\{\s*inputs\.([\w-]+)\s*\}\}/g)].map((m) => m[1]);
+/* 两条正对照：解析器抽空了的话下面那条「都声明过」会因为无一可查而空绿。 */
+check("action.yml 里抽得到 inputs 声明", DECLARED.length, 4);
+check("action.yml 里抽得到 inputs 引用", REFERENCED.length, 4);
+check("env 里引用的 input 都声明过",
+  REFERENCED.filter((n) => !DECLARED.includes(n)).join("、"), "");
+
 /* 抽空了的解析器会让下面每一条都变成空跑，而且全绿——先把这件事排除掉。 */
 check("抽得出 action.yml 里那段 run", /node "\$GITHUB_ACTION_PATH\/docs-only\.js"/.test(RUN_BODY), true);
 
