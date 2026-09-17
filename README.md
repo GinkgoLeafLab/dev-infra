@@ -13,6 +13,7 @@
 | `.github/actions/docs-only/` | 组合动作 + 纯文档判定 + 它的测试 | **各仓的 workflow 直接 `uses:` 它**，当成一个步骤用 |
 | `shared/` | **第二层的源文件**：必须躺在各仓里才会被读到的那几份脚本与它们的测试 | 各仓 `node scripts/vendor-infra.js --sync <tag>` 拉过去。**落点按清单逐份记**，不是统一放一个目录：脚本落 `scripts/`，`pre-commit` 落 `.githooks/` |
 | `.github/workflows/test.yml` | 本仓自己的测试，连同 `shared/` 里那些套件 | 不适用 |
+| `submodule-shape.test.js` + `.gitattributes` | 钉住「各仓把这里当 submodule 挂上会拿到什么」 | 不适用 |
 
 取舍见 `GinkgoLeafLab/GTO-Trainer` 的 `docs/方案/2026-09-跨仓库基础设施复用.md`。
 一句话：那份方案把要复用的东西按「**能不能没有本地副本**」分三层，
@@ -277,8 +278,13 @@ uses: GinkgoLeafLab/dev-infra/.github/workflows/review-gate.yml@main   # ❌
 ## `shared/`：第二层的源文件
 
 这里面装的是**必须躺在各消费仓里才会被读到的可执行文本**——今天是分支守卫
-（连同它的 `pre-commit` 钩子）、装 hook 那个脚本、**同步机制自己**，
+（连同 `shared/githooks/pre-commit` 那个钩子）、装 hook 那个脚本、**同步机制自己**，
 以及**它们各自的测试**。
+
+**钩子单独一个目录 `shared/githooks/`，不散在 `shared/` 根下**，这是刻意的：
+消费仓的 `core.hooksPath` 将来指向那个目录，所以**放进去的任何一个按钩子命名的文件
+都会在每一个消费仓自动生效**。目录里装什么由 `submodule-shape.test.js` 的白名单钉着，
+加一个钩子必须同时改那一行——这个显式性不能丢。
 它们没法做成组合动作，判据是**谁在调它**：这几份的调用方都是各仓本地的一条路径——
 `guard-branch.js` 由 `.claude/settings.json`（PreToolUse hook）与 `.githooks/pre-commit`
 调用，`setup-hooks.js` 由 `npm prepare` 调用，`vendor-infra.js` 是把这一切拉进来的
@@ -302,9 +308,12 @@ uses: GinkgoLeafLab/dev-infra/.github/workflows/review-gate.yml@main   # ❌
 而 `.githooks/pre-commit` 少了那一位，git 直接跳过、**不报任何错**。
 所以那一位必须由清单载着、由 `--sync` 显式打上、由 `--check` 对着查——
 靠源文件自己的模式传不过去（`fs.writeFileSync` 新建出来的文件本来就不带它）。
-**这个仓库里 `shared/pre-commit` 就是 `100644`**：推它用的 GitHub Contents API
-一律写 100644，而这套工具里没有能设模式的口子。这不影响正确性，但它正是
-「模式得单独记一项」的现实理由——写在这儿免得下一个人以为源文件的模式会自己传下去。
+
+**钩子在这个仓库里现在是 `shared/githooks/pre-commit`，而且是 `100755`。**
+它曾经是 `shared/pre-commit` / `100644`——推文件用的 GitHub Contents API 一律写 100644，
+而这套工具里没有能设模式的口子，所以那一位是**人手动打上去的**，一次。
+打上之后它活在这个仓库的对象库里，**`--sync` 与将来的 submodule 都直接载着它走**。
+`submodule-shape.test.js` 钉着这一位，做过变异验证：打回 `100644` 当场红。
 
 ### 同步机制自己也在 `shared/` 里
 
