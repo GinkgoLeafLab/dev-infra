@@ -45,7 +45,7 @@ function decide(labels, action, label) {
      是 webhook **事件创建那一刻**的快照——快照过没过期和事件类型无关，所以不能拿事件类型当键：
 
      1. head = SHA1，`qa-tester` 打上 `qa-passed` → 事件 A（labeled），run A 排队
-     2. 作者推了 SHA2 → 事件 B（synchronize），快照里仍然带着 `qa-passed`
+     2. 作者推了 SHA2 → 事件 B（synchronize），快照里仍带着 `qa-passed`
      3. run A 那句 DELETE 还没落地的这段时间里，**任何一个 `qa-` 标签动作**
         （有人补打 `qa-required`、或者摘掉它）→ 事件 C 的快照里照样带着 `qa-passed`，
         而 head 已经是 SHA2 → 于是**在没人测过的 SHA2 上写 success**
