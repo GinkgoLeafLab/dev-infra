@@ -72,6 +72,13 @@ jobs:
         if: always()
         run: node .github/actions/docs-only/docs-only.test.js
 
+      # 这一条验的不是这个仓库自己跑得对不对，而是**各消费仓把它当 submodule 挂上之后
+      # 会拿到什么**：钩子的可执行位、行尾、钩子目录的白名单。三件事失效的时候
+      # 这个仓库一切正常，只有消费仓那边才暴露，而且都不报错。
+      - name: submodule 形态
+        if: always()
+        run: node submodule-shape.test.js
+
       # 下面跑的是 shared/ 里那几份源文件自己的测试。
       - name: 分支守卫（shared/）
         if: always()

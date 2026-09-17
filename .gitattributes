@@ -1,0 +1,12 @@
+# 各消费仓把这个仓库当 **git submodule** 挂在自己的 `vendor/dev-infra` 下，
+# 所以这里的字节形态直接变成各仓检出到的字节形态——**这道保险从各仓搬到了这儿**。
+#
+# 为什么必须是 eol=lf：`shared/githooks/pre-commit` 由 sh 执行，
+# Windows 上 `core.autocrlf=true` 检出成 CRLF 之后 `#!/bin/sh\r` 起不来，
+# 而钩子起不来 git **不报任何错**，只是不拦了。
+#
+# 覆盖整个仓库而不是只覆盖 shared/：组合动作里那几段 `run:` 也是 bash，
+# 同一个理由；而且「哪些算文本」交给 text=auto 去判比我们自己列一张表可靠。
+* text=auto eol=lf
+
+# 这一条由 submodule-shape.test.js 的 `git check-attr` 钉着，不是靠人记得。
