@@ -312,7 +312,13 @@ uses: GinkgoLeafLab/dev-infra/.github/workflows/review-gate.yml@main   # ❌
 **钩子在这个仓库里现在是 `shared/githooks/pre-commit`，而且是 `100755`。**
 它曾经是 `shared/pre-commit` / `100644`——推文件用的 GitHub Contents API 一律写 100644，
 而这套工具里没有能设模式的口子，所以那一位是**人手动打上去的**，一次。
-打上之后它活在这个仓库的对象库里，**`--sync` 与将来的 submodule 都直接载着它走**。
+打上之后它活在这个仓库的对象库里，**submodule 那条路直接载着它走**。
+
+**`--sync` 那条路不是这样，别把两者混成一句**：它照**消费仓清单里那一项**打模式
+（`shared/vendor-infra.js` 里那句注释写得很直白——「模式是清单说了算，不是上游那份源文件
+说了算，它载不动这一位」），上游这一位在那条路上一次都不会被读到。
+所以清单里的 `mode` 字段**不能因为上游打了这一位就去掉**。
+
 `submodule-shape.test.js` 钉着这一位，做过变异验证：打回 `100644` 当场红。
 
 ### 同步机制自己也在 `shared/` 里
