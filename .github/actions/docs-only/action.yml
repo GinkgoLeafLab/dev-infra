@@ -28,9 +28,7 @@ inputs:
   head:
     description: diff 的终点 SHA（PR 用 head.sha，推送用 github.sha）
     required: true
-  merge_base:
-    # 名字用下划线不是连字符：`${{ inputs.merge-base }}` 在表达式里会被当成减法，
-    # 要写成 inputs['merge-base'] 才对。这种一眼看不出来的坑不值得留着。
+  merge-base:
     description: >-
       传 "true" 走三点 diff。PR 的改动要相对**分叉点**算，否则 base 分支自己往前走一步，
       别人的改动就会被算进这个 PR；推送到主干是两点 diff，不传这个。
@@ -46,6 +44,9 @@ inputs:
     default: ""
 
 outputs:
+  # 名字是下划线，和上面几个 input 不一样：这个串是 docs-only.js 自己写进
+  # $GITHUB_OUTPUT 的，各仓的 `if: steps.scope.outputs.docs_only != 'true'`
+  # 已经这么写着。改成连字符要同时改脚本和每一个仓，换不到任何东西。
   docs_only:
     description: '"true" / "false"。判定失败时是 "false"，也就是照常跑测试'
     value: ${{ steps.decide.outputs.docs_only }}
@@ -67,7 +68,7 @@ runs:
       env:
         DOCS_ONLY_BASE: ${{ inputs.base }}
         DOCS_ONLY_HEAD: ${{ inputs.head }}
-        DOCS_ONLY_MERGE_BASE: ${{ inputs.merge_base }}
+        DOCS_ONLY_MERGE_BASE: ${{ inputs.merge-base }}
         DOCS_ONLY_SKIPPED: ${{ inputs.skipped }}
       # 用数组拼参数、不用字符串：`--skipped=npm test 与内测部署` 里有空格，
       # 拼成字符串再展开会被切成三个参数，判定当场看不见 --skipped。
