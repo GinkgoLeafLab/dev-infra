@@ -68,7 +68,7 @@
 也就是照常跑测试。**这一层的失败方向永远是「跑测试」那一边。**
 
 **这两条混用过一次，代价很大**：`v1.1.0` 的内层写的是 `@v1`（那是「挪 tag」时代
-留下的写法），而 `v1` 指着组合动作还不存在的那个 commit——**那一版的 qa-gate
+留下来的写法），而 `v1` 指着组合动作还不存在的那个 commit——**那一版的 qa-gate
 在每个消费仓上都跑不起来**，`qa` 这个必需检查永远停在
 "Expected — waiting for status"，而 `pull_request_target` 取默认分支的定义，
 所以**连来修它的那个 PR 自己也合不了**。`.github/actions/qa-gate/qa-gate.test.js`
@@ -218,7 +218,7 @@ caller 钉的是 `…/workflows/labels-sync.yml@vX.Y.Z`，那个 tag 上的工�
           head: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           # PR 的改动要相对**分叉点**算（三点 diff），否则 base 分支自己往前走一步，
           # 别人的改动就会被算进这个 PR。推送到主干是两点 diff。
-          merge_base: ${{ github.event_name == 'pull_request' }}
+          merge-base: ${{ github.event_name == 'pull_request' }}
           # 只改那条 ::notice:: 的措辞，判定逻辑不受它影响。不给就是「npm test」。
           skipped: npm test 与内测部署
 
