@@ -5,9 +5,9 @@ name: test
 #
 # 它跑两类套件，清单以下面的 steps 为准。一类是第一层的（qa-gate、labels-sync
 # 与 docs-only）：既验各自的判定/同步逻辑，
-# 也把接线本身验一遍（不许加 checkout、按不可变 tag 引用动作、脚本与清单走
-# $GITHUB_ACTION_PATH；docs-only 那份是把 action.yml 里那段 run 抽出来真跑一遍）。
-# 理由逐条写在那三份文件里。
+# 也把接线本身验一遍（不许加 checkout、组合动作按 `$/` 自引用同仓的自己、
+# 脚本与清单走 $GITHUB_ACTION_PATH；docs-only 那份是把 action.yml 里那段 run
+# 抽出来真跑一遍）。理由逐条写在那三份文件里。
 #
 # 另一类是 `shared/` 里第二层那几份源文件自带的测试。各消费仓同步过去之后**也会跑**
 # （那几份 *.test.js 是跟着一起同步的，落在各仓自己的套件清单里），
@@ -39,16 +39,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      # **`fetch-tags: true` 不是可选的**：`actions/checkout` 默认 `fetch-tags: false`，
-      # 工作副本里一个 tag 都没有，而 qa-gate.test.js 的 W8 要按 tag 读内容
-      # （「内层 `uses:` 指的那个 tag 上真的有这个动作吗」）。没有 tag 时它会把
-      # **每一次**都当成「前向引用」放过去——包括引用了一个真实存在、内容却对不上的
-      # 旧 tag，也就是 dev-infra#3 修的那个 bug 本身。
-      # 拿掉这一行，W8 会红（它自己钉着这个前提），不会静默变瞎。
-      # `fetch-depth` 保持默认的 1：只多取 tag 的引用，不要历史。
+      # **不再需要 `fetch-tags: true`。** 它以前是 qa-gate.test.js 的 W8 与
+      # labels.test.js 的 L9 的前提——那两条按 git tag 读「内层 `uses:` 指的那个
+      # tag 上真的有这个动作吗」，没有 tag 时会把每一次都当成「前向引用」放过去，
+      # dev-infra#3 修的就是这条缝。
+      #
+      # `.github/workflows/qa-gate.yml` 与 `labels-sync.yml` 内层那三行自引用
+      # 换成 `$/` 之后（调研见 GinkgoLeafLab/GTO-Trainer 的
+      # docs/方案/2026-09-第一层要不要也走-subtree.md），
+      # 这两条检查不再按 tag 读内容，改成验「`$/` 引用的路径在这个仓库里真的
+      # 存在 action.yml」——纯静态路径判断，不需要 git、更不需要 tag。
+      # 拿掉这一行不会让任何东西静默变瞎：那两条测试今天不读 git tag。
       - uses: actions/checkout@v7
-        with:
-          fetch-tags: true
 
       # 不加 setup-node：这些脚本零依赖、只用 fs / path / child_process，
       # 而且**生产上它们跑在 runner 自带的 node 上**（组合动作里没有 setup-node，
