@@ -54,33 +54,49 @@
   各仓因此连标签清单都不再各存一份——这是这套机制唯一一处共享的不是逻辑而是**数据**，
   单独说清楚见下面「这里放什么、不放什么」
 - 这条路上**一次 checkout 都不做**，`contents: read` 那个坑结构性地没有了
-- 版本号出现两次（caller → 工作流，工作流 → 动作），而**两处各钉各的**——
-  tag 不移动，所以内层那一行必须写**这个 commit 自己打算被发成的那个 tag**，
-  是个前向引用：合并的那一刻它还不存在，打上 tag 它才解析得开
+- **`qa-gate.yml` / `labels-sync.yml` 内层引用它们各自的组合动作时，用的是
+  GitHub 的自引用语法 `$/`**（`uses: $/.github/actions/qa-gate`），不是
+  `owner/repo/path@tag`。`$/` 解析到「这份文件自己所在的仓库，运行时那个
+  commit」——官方原文点名了这个形状："if a reusable workflow in one repository
+  is called by a workflow in another repository, a `$/` reference in the called
+  workflow resolves to the called workflow's repository"。所以这条路上**没有
+  第二个版本号要人对齐**，也没有「这个 commit 打算被发成哪个 tag」那种前向引用：
+  内层引用永远和这份文件本身是同一个 commit（调研与取舍见
+  `GinkgoLeafLab/GTO-Trainer` 的 `docs/方案/2026-09-第一层要不要也走-subtree.md`）。
+  **这只管内层这三行**——各消费仓的 caller 仍然要按不可变 tag 钉，见下面「按
+  tag 钉，不要按分支」
 
 **组合动作有两种用法，别把第二种当成第一种读。** `qa-gate` 与 `labels-sync`
 只被本仓的可复用工作流调，各仓看不见它们；`docs-only` 是**各仓的 workflow 直接
 `uses:` 的一个步骤**——判定完各仓自己用 `if:` 决定跳过哪几步，而「跳哪几步」逐仓不同
-（跑测试、部署、校验部署配置），判定这件事所有仓一模一样。
+（跑测试、部署、校验部署配置），判定这件事所有仓一模一样。**`docs-only` 是真跨仓
+引用，各仓按不可变 tag 钉；`qa-gate` / `labels-sync` 的内层是同仓自引用，用 `$/`
+——两者形状不同是因为调用方不同，别把其中一种的写法套到另一种上。**
 
 跟着这种用法来的还有一条：**`docs-only` 要调用方先 checkout，而且 `fetch-depth: 0`**。
 它在调用方的工作区里跑 `git diff`，浅克隆里 base 那个对象根本不存在。
 忘了不会静默判错——取不到 base 就打 `::warning::` 并输出 `docs_only=false`，
 也就是照常跑测试。**这一层的失败方向永远是「跑测试」那一边。**
 
-**这两条混用过一次，代价很大**：`v1.1.0` 的内层写的是 `@v1`（那是「挪 tag」时代
-留下来的写法），而 `v1` 指着组合动作还不存在的那个 commit——**那一版的 qa-gate
-在每个消费仓上都跑不起来**，`qa` 这个必需检查永远停在
+**`$/` 之前不是这样，而且代价很大**：`v1.1.0` 的内层写的是 `@v1`（那是「挪 tag」
+时代留下来的写法），而 `v1` 指着组合动作还不存在的那个 commit——**那一版的
+qa-gate 在每个消费仓上都跑不起来**，`qa` 这个必需检查永远停在
 "Expected — waiting for status"，而 `pull_request_target` 取默认分支的定义，
-所以**连来修它的那个 PR 自己也合不了**。`.github/actions/qa-gate/qa-gate.test.js`
-的 W3（必须是完整的 `vX.Y.Z`，不许 `@v1` 这种会动的名字）与 W8
-（这个 tag 如果已经存在，它必须真的含有这个动作）现在钉着这一条，做过变异验证。
+所以**连来修它的那个 PR 自己也合不了**。`$/` 结构性地消灭了这整类失效——
+它不看任何 tag，不存在「引用了一个还不存在的 tag」或「引用了一个已经存在、
+但内容对不上的旧 tag」这两种可能。`.github/actions/qa-gate/qa-gate.test.js`
+的 W3（内层必须精确是 `$/.github/actions/qa-gate`，不许带 `@{ref}`）与 W8
+（`$/` 引用的路径在这个仓库里真的存在 `action.yml`）现在钉着这一条，
+做过变异验证；`labels.test.js` 的 L3/L9 是同一个形状。
 
-**代价说清楚**：在 dev-infra 的特性分支上，那一行指着一个还没打的 tag，
-所以「新动作 + 新工作流」这套接线**在打 tag 之前没有任何一条流水线验得到**。
-兜底的是本仓 `.github/workflows/test.yml`：判定逻辑和接线形状
-（不许加 checkout、按不可变 tag 引用、脚本走 `$GITHUB_ACTION_PATH`）
-都有源码断言钉着，做过变异验证。
+**这也改变了「打 tag 之前验不验得到」这件事，是一处实打实的改善**：以前内层
+写的是前向引用，在 dev-infra 的特性分支上指着一个还没打的 tag，所以「新动作 +
+新工作流」这套接线**在打 tag 之前没有任何一条流水线验得到**——本仓
+`.github/workflows/test.yml` 只能靠拉下 tag 去读一个还不存在的东西，那条路
+天然验不动前向引用（`test.yml` 里因此曾经要 `fetch-tags: true`）。换成 `$/`
+之后**不再有前向引用**：内层引用和这份文件本身永远同一个 commit，
+`test.yml` 在合并前的每一次 PR 上就能验到「新动作 + 新工作流」这套接线，
+`fetch-tags: true` 也因此不再需要。
 
 ## 这个仓库是公开的
 
@@ -181,11 +197,14 @@ jobs:
 别拿它去给别的流水线加 `paths`。
 
 **清单改了不会自己传到各仓，而且只有一条路传得过去：升 caller 里那一行 `uses:`。**
-caller 钉的是 `…/workflows/labels-sync.yml@vX.Y.Z`，那个 tag 上的工作流内层又钉着
-`…/actions/labels-sync@vX.Y.Z`，而清单**跟着组合动作在那个 tag 上**下发
+caller 钉的是 `…/workflows/labels-sync.yml@vX.Y.Z`；那个 tag 上的工作流内层用
+`$/` 引用它自己的组合动作，`$/` 解析到「这份文件所在的仓库，运行时那个
+commit」——也就是 caller 钉的**同一个** tag 指向的那个 commit，不需要再钉第二个
+版本号（内层以前按 `…/actions/labels-sync@vX.Y.Z` 单独钉一次，见上面「为什么有
+组合动作这一层」）。清单**跟着组合动作在那同一个 commit 上**下发
 （`action.yml` 里 `BASE: ${{ github.action_path }}/labels.json`）。tag 不移动，
-所以**不升版本号就永远是那份旧清单**——`workflow_dispatch` 是这样，`schedule` 也是这样
-（它追的始终是自己钉着的那个 tag，追不上一个更新的清单）。
+所以**不升 caller 那一行版本号就永远是那份旧清单**——`workflow_dispatch` 是这样，
+`schedule` 也是这样（它追的始终是自己钉着的那个 tag，追不上一个更新的清单）。
 
 **走错这条路是绿的**：run 成功，dry-run 那一步照常打印一份「没什么要做」的计划，
 没有任何东西会说它算的是旧清单。
@@ -264,10 +283,13 @@ uses: GinkgoLeafLab/dev-infra/.github/workflows/review-gate.yml@main   # ❌
 **tag 不移动，永远是打一个新的。** 这正是「未经各仓评审的改动不会生效」那句话成立的
 原因：升级只能靠改各仓 caller 里那一行 `uses:`，而那一行要在各仓被评审。
 
-1. 在这个仓库走 PR、评审、合并。**改 qa-gate 时，PR 里就要把
-   `.github/workflows/qa-gate.yml` 内层那一行 `uses:` 改成这次要发的版本号**——
-   那一行就是「该打哪个 tag」的唯一真相
-2. **在合并后的 commit 上打那个 tag。** 照着上面那一行写的版本号打，别另想一个。
+1. 在这个仓库走 PR、评审、合并。**`qa-gate.yml` / `labels-sync.yml` 内层那三行
+   自引用用的是 `$/`，这一步不用再改它们**——`$/` 自动跟着这个 commit 走，
+   没有第二个版本号要在 PR 里对齐（以前按 `@vX.Y.Z` 引用时，那一行写的就是
+   「该打哪个 tag」的唯一真相；这一条随着换成 `$/` 一起作废，见上面「为什么有
+   组合动作这一层」）
+2. **在合并后的 commit 上打一个新 tag。** 打哪个版本号是普通的语义化版本判断
+   （这个改动是不是破坏性变更、只是加功能还是纯修 bug），不再从内层引用的哪一行读出来。
    **这一步是人做的**（agent 在这个环境里打不了 tag，会拿到 403）
 3. 各仓库把自己 caller 里的 `uses:` 升到新版本，走各自的 PR 与评审
 

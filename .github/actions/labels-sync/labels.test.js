@@ -330,9 +330,26 @@ async function main() {
 
     check(/^on:\n\s*workflow_call:/m.test(wf), "L1 读到的确实是那份可复用工作流（正对照）");
     check(/^\s*uses: /m.test(wf), "L2 正对照：这份工作流里确实有 `uses:` 这种写法");
-    check(/uses: GinkgoLeafLab\/dev-infra\/\.github\/actions\/labels-sync@v\d+\.\d+\.\d+\s*$/m.test(wf),
-      "L3 内层必须按**不可变 tag**引用同仓的组合动作——不能是 `./`、不能是 `@main`、" +
-      "**也不能是 `@v1` 这种会动的名字**（v1.1.0 就是那么发坏的）");
+    /* L3 的判据换了，和 qa-gate.test.js 的 W3 同一个理由：以前按不可变 tag
+       （`@vX.Y.Z`）引用；现在这一行是**同仓自引用**，换成了 GitHub 的 `$/`
+       语法——它解析到「这份文件所在的仓库，运行时那个 commit」，不看任何 tag
+       （调研与取舍见 GinkgoLeafLab/GTO-Trainer 的
+       docs/方案/2026-09-第一层要不要也走-subtree.md）。**不许带 `@{ref}` 后缀**
+       （官方原文："A `$/` reference must not include an `@{ref}` suffix"），
+       **不许是 `./` 相对路径**（对着工作区解析，这条路上没人被 checkout），
+       **不许是 `@main` / `@v1` 这种会动的名字**（`v1.1.0` 就是那么发坏的，
+       `$/` 从设计上就不认 ref）。
+
+       这份文件里有**两处**引用 labels-sync 这个组合动作（dry-run 与 apply
+       各一次），**必须每一处都精确匹配，不是「至少一处」**——只改对一行、
+       漏了另一行，单次 `.test()` 会被那一行没改到的旧写法放过去。 */
+    {
+      const refs = (wf.match(/^\s*uses:.*$/gm) || []).filter((l) => l.includes("actions/labels-sync"));
+      check(refs.length > 0, "L3 正对照：工作流里至少引用了一次同仓组合动作 labels-sync（下面判据不是凭空的）");
+      check(refs.length > 0 && refs.every((l) => /uses:\s*\$\/\.github\/actions\/labels-sync\s*$/.test(l)),
+        "L3 每一处引用都必须精确是 `$/.github/actions/labels-sync`——不许带 `@{ref}`、" +
+        "不许是 `./` 相对路径、不许是 `@main` / `@v1` 这种会动的名字");
+    }
     check(!/actions\/checkout@/.test(wf),
       "L4 这条路上不许有 checkout——清单和脚本都跟着动作下发，caller 没给 `contents`");
 
@@ -474,30 +491,30 @@ async function main() {
       "L10 这几个字段里出现了 " + EXPR + "：" + bad.map(r => r.path).join("、") +
       "——那些位置没有 github 上下文，整份清单会加载失败");
 
-    /* L9：内层引用的那个 tag 如果**已经存在**，它必须真的含有这个动作。
-       判据故意是「已经存在的」而不是「必须存在」：正常发布流程里这一行是前向引用。
-       一个 tag 都没有时**红**，不是跳过——`actions/checkout` 默认
-       `fetch-tags: false`，那样这条会把每一次都当成前向引用放过去（qa-gate 的 W8
-       第一版就是这么瞎掉的，本仓 test.yml 因此钉着 `fetch-tags: true`）。 */
-    const ref = (wf.match(/uses: GinkgoLeafLab\/dev-infra\/\.github\/actions\/labels-sync@(\S+)/) || [])[1];
-    const git = (args) => require("child_process")
-      .spawnSync("git", ["-C", path.join(dir, ".."), ...args], { encoding: "utf8" });
-    const inRepo = git(["rev-parse", "--git-dir"]).status === 0;
-    const anyTag = inRepo && (git(["tag", "-l"]).stdout || "").trim() !== "";
-    const known = ref && inRepo && git(["rev-parse", "--verify", "--quiet", `refs/tags/${ref}`]).status === 0;
-    if (!ref) {
-      check(false, "L9 前提：读得出内层引用的那个 tag");
-    } else if (!inRepo) {
-      console.log(`  · L9 跳过：这儿不是 git 仓库（或没有 git），验不了 tag \`${ref}\` 的内容`);
-    } else if (!anyTag) {
-      check(false, "L9 前提：**本地取到了 tag**——一个都没有说明 checkout 没带 tag 下来" +
-        "（`actions/checkout` 默认 `fetch-tags: false`）。修法是加 `fetch-tags: true`，不是把这条改绿");
-    } else if (!known) {
-      console.log(`  · L9 跳过：tag \`${ref}\` 还不存在（前向引用，发布时才打）`);
+    /* L9 以前补的是 L3 看不见的那一半：引用的**形状**合法，不等于**那个 tag 上
+       真的有这个动作**——`v1.1.0` 就是从这条缝漏过去的（`@v1` 形状全绿、内容没有）。
+       那条检查必须按 git tag 读内容，只有 tag 已经打出来才验得动，CI 上还得靠
+       `fetch-tags: true` 才不会被静默放过（qa-gate 的 W8 第一版就是漏了这个前提，
+       恒为「跳过」还打出一句假话）。
+
+       换成 `$/` 之后，**这整个失效类别结构性地消失了**：它不看任何 tag，只看
+       「这份文件所在的仓库，运行时那个 commit」——引用的内容和这份文件本身
+       永远是同一个 commit。所以 L9 换成验一个 `$/` 才会有的新失效：**路径本身
+       打错字**，跑起来才会当场 404。这条检查现在直接看「这个仓库里，这个路径，
+       真的有一个 `action.yml` 吗」——不需要 git、不需要 tag，纯静态路径存在性
+       判断，和 qa-gate.test.js 的 W8 同一个形状。
+
+       **这是加强，不是退让**：旧版只在「tag 已经打出来」时才生效，合并前的
+       每一次 PR 都验不到；新版每次都跑，也不再需要「这儿不是 git 仓库」那个
+       跳过分支。 */
+    const labelsSyncPath = (wf.match(/uses:\s*\$\/(\S+)/) || [])[1];
+    const root = path.join(dir, "..");
+    if (!labelsSyncPath) {
+      check(false, "L9 前提：读得出 `$/` 后面引用的那个路径");
     } else {
-      const tree = git(["ls-tree", "--name-only", ref, ".github/actions/labels-sync/"]).stdout || "";
-      check(/action\.yml/.test(tree),
-        `L9 内层引用的 tag \`${ref}\` 上真的有这个组合动作——形状合法不等于内容对得上`);
+      check(fs.existsSync(path.join(root, labelsSyncPath, "action.yml")),
+        `L9 \`$/\` 引用的路径 \`${labelsSyncPath}\` 在这个仓库里真的有 action.yml——` +
+        "路径打错字会在这条上当场露出来，不用等到跑起来才 404");
     }
   }
 

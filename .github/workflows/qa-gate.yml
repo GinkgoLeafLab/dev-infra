@@ -72,23 +72,26 @@ jobs:
     timeout-minutes: 5
     # permissions 不写在这儿，见上面第 3 条。
     steps:
-      # 判定逻辑与那段脚本都在这个组合动作里，跟着 tag 一起下发。
-      # **按 tag 引用，不能写成 `./.github/actions/qa-gate`**：相对路径是对着**工作区**
-      # 解析的，而这条路上谁都没被 checkout 到工作区里。
+      # 判定逻辑与那段脚本都在这个组合动作里，**和这份工作流住在同一个仓库、
+      # 同一个 commit**，所以用 GitHub 的自引用语法 `$/`——它解析到
+      # 「这份文件所在的仓库，运行时那个 commit」，不是调用方的仓库
+      # （官方 workflow syntax 原文点名了这个形状：a `$/` reference in the called
+      # workflow resolves to the called workflow's repository）。
       #
-      # **这一行写的是「这个 commit 打算被发成哪个 tag」，所以它是前向引用**：
-      # 合并的那一刻这个 tag 还不存在，人在合并后的 commit 上打上它，它才解析得开。
-      # 看着别扭，但在**不可变 tag** 这条策略下它是唯一正确的写法——
-      # 而且这行就是发布时该打哪个 tag 的唯一真相（见 README「改这里的东西之后」）。
+      # **不能写成 `./.github/actions/qa-gate`**：相对路径是对着**工作区**解析的，
+      # 而这条路上谁都没被 checkout 到工作区里，`./` 会指到消费仓的空工作区上。
+      # **不能带 `@{ref}` 后缀**——官方原文："A `$/` reference must not include
+      # an `@{ref}` suffix"，带了是非法语法。
       #
-      # **必须是完整的 `vX.Y.Z`，不能是 `@v1` 这种会动的名字。** 这不是洁癖：
-      # `v1.1.0` 上这一行写的正是 `@v1`，而 `v1` 指着动作还不存在的那个 commit——
-      # 于是那一版的 qa-gate 谁都跑不起来，`qa` 这个必需检查在每个消费仓上
-      # 永远停在 "Expected — waiting for status"，**而且要修它的那个 PR 自己也合不了**
-      # （`pull_request_target` 取默认分支的定义）。
-      # 会动的 tag 名和不可变 tag 这条策略混在一起，就长这样。W3/W8 钉着这一条。
+      # 这条路上不再有「前向引用」这回事：以前按 `@vX.Y.Z` 引用时，这一行写的是
+      # 「这个 commit 打算被发成哪个 tag」，合并那一刻 tag 还不存在，
+      # 而 `v1.1.0` 就是这么发坏的（写成 `@v1`，`v1` 指着动作还不存在的那个 commit，
+      # 于是那一版的 qa-gate 谁都跑不起来，`qa` 在每个消费仓上永远停在
+      # "Expected — waiting for status"，连修它的那个 PR 自己也合不了）。
+      # `$/` 结构性地消灭了这整类失效——它不看任何 tag，只看这个 commit 自己。
+      # W3/W8 钉着「必须是 `$/` 精确自引用，不许是别的形状」。
       - id: gate
-        uses: GinkgoLeafLab/dev-infra/.github/actions/qa-gate@v1.2.0
+        uses: $/.github/actions/qa-gate
 
       # 钉死 head.sha（脚本里已经写进请求体了）：打标签的同时有人推了新 commit 的话，
       # 检查落在旧 SHA 上，PR 仍然是拦住的。

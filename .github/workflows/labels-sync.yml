@@ -48,20 +48,25 @@ jobs:
     steps:
       # 先 dry-run 打一遍计划：出了问题，日志里看得见「本来要做什么」。
       # 两步用的是同一个动作、同一份清单，差别只有 apply。
+      # 这个组合动作和这份工作流住在同一个仓库、同一个 commit，用 GitHub 的
+      # 自引用语法 `$/`——解析到「这份文件所在的仓库，运行时那个 commit」，
+      # 不看任何 tag，所以这条路上不再有「前向引用」这回事（对比：以前按
+      # `@vX.Y.Z` 引用时这一行写的是「这个 commit 打算被发成哪个 tag」，
+      # 合并那一刻 tag 还不存在；`v1.1.0` 就是把它写成 `@v1` 才发坏的——
+      # `v1` 指着组合动作还不存在的那个 commit）。**不能带 `@{ref}` 后缀**
+      # （官方原文：a `$/` reference must not include an `@{ref}` suffix），
+      # **不能写成 `./`**（相对路径对着工作区解析，这条路上没人被 checkout）。
+      # labels.test.js 的 L3/L9 钉着「必须是 $/ 精确自引用」。
       - name: 看看要做什么（dry-run）
-        uses: GinkgoLeafLab/dev-infra/.github/actions/labels-sync@v1.4.0
+        uses: $/.github/actions/labels-sync
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           repository: ${{ github.repository }}
           qa-labels: ${{ inputs.qa-labels }}
           apply: "false"
 
-      # **这一行写的是「这个 commit 打算被发成哪个 tag」，是前向引用**：
-      # 合并的那一刻 tag 还不存在，人在合并后的 commit 上打上它才解析得开。
-      # 必须是完整的 vX.Y.Z，不能是 @v1 这种会动的名字——v1.1.0 就是那么发坏的
-      # （内层引用 @v1，而 v1 上根本没有组合动作）。labels.test.js 的 L3/L9 钉着。
       - name: 同步
-        uses: GinkgoLeafLab/dev-infra/.github/actions/labels-sync@v1.4.0
+        uses: $/.github/actions/labels-sync
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           repository: ${{ github.repository }}
