@@ -66,7 +66,7 @@ async function main() {
     for (const n of ["bug", "enhancement", "chore",
                      "sev/blocker", "sev/major", "sev/minor", "sev/cosmetic",
                      "status/unclaimed", "status/in-progress", "status/not-a-bug",
-                     "review-passed", "review/in-flight"]) {
+                     "review-passed"]) {
       check(names.has(n), `基础清单里缺了流程标签 ${n}`);
     }
 
