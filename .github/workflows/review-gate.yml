@@ -59,6 +59,29 @@ name: review-gate (reusable)
 # **原因没查到出处**，所以这条只能靠「实测过、别改回去」拦——
 # 改回去 PR 就再也合不了，而这个 gate job 还是绿的。
 
+# ---------------------------------------------------------------------------
+# 两条路：打 review-passed 是「通过」，推新 commit 是「检查结论还算不算数」
+# ---------------------------------------------------------------------------
+#
+# **这个 workflow 现在响应两种 caller 事件，做什么完全不同**：
+#
+# | caller 的 trigger | 这个 job 做什么 |
+# |---|---|
+# | `labeled` + `review-passed` | 在 head SHA 上写 `review` = success（评审通过） |
+# | `synchronize`（推了新 commit） | 读 PR 写锁，判这次推送有没有让在飞的评审结论作废 |
+#
+# 第二条是**PR 写锁**。加它的理由（那是真事故）：`GTO-Trainer#182` 一份纯文档走了
+# 9 轮评审，**其中两轮已判「通过」，都因为作者随后推了新 commit 而作废**——
+# 因为「有人正在审」这件事没人知道，评审在飞的那十几分钟里作者可以自由推进。
+# 调研与取舍见本仓 docs/方案/2026-09-PR-写锁.md。
+#
+# **它不阻止 push，也阻止不了**：实测 ruleset 只覆盖 `~DEFAULT_BRANCH`（推在特性分支上
+# 的提交不受它管），而且必需检查的语义是「不能合并」不是「不能 push」——官方文档
+# *Available rules for rulesets* 原话是 "all required status checks must pass before
+# collaborators can **merge** changes into the branch or tag"。
+# 所以它的作用是**让「你的结论已作废」当场上报**，把这个事实从「作者事后自己算」
+# 变成「一条当场变红的必需检查」。
+
 on:
   workflow_call:
 
@@ -82,7 +105,11 @@ jobs:
       # jq 顺带把登录名的转义也接过去了。
       #
       # 走环境变量而不是把登录名直接插进 run：那是注入口子。
+      #
+      # **只在 labeled 那条路上跑。** synchronize（推了新 commit）走下面那组步骤——
+      # 它要做的是「判这次推送有没有让在飞的评审作废」，不是「通过」。
       - name: 在 head SHA 上写 review commit status
+        if: github.event.action != 'synchronize'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -109,9 +136,101 @@ jobs:
       # （GitHub 文档：events triggered by the GITHUB_TOKEN will not create a new
       # workflow run），所以不会和 caller 的 labeled 触发器绕成环。
       - name: 摘掉标签
-        if: always()
+        if: always() && github.event.action != 'synchronize'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
         run: gh api -X DELETE "repos/$REPO/issues/$PR/labels/review-passed"
+
+      # ---------------------------------------------------------------------
+      # PR 写锁：推了新 commit 时，判这次推送有没有让在飞的评审结论作废
+      # ---------------------------------------------------------------------
+      #
+      # 判定逻辑在组合动作里（有测试钉着），这里只负责**把它的输入取回来、
+      # 把它的输出交出去**。为什么判定不能写在 YAML 里见 review-gate-lock/lock.js 顶部。
+      #
+      # **这里要读评论**，所以这个 job 需要读评论的权限（官方权限名叫 `pull-requests`，
+      # caller 那条 `pull-requests: write` 盖得住）。
+      # 读不到评论时一律落到空数组：判定会把「读不到锁」当作**没有锁**。
+      # **失败方向是少一层保护，不是误拦 PR**——锁挂了不能让所有 PR 合不了。
+      # （对比 qa-gate 那边是反过来的：那边失败必须拦住，因为那是放行门。）
+      - name: 读 PR 写锁
+        if: github.event.action == 'synchronize'
+        id: lock
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          # **`--paginate` 配 `--jq` 出来的不是一段合法 JSON**：gh 是把每一页的
+          # jq 结果**各自序列化后首尾相接**吐出来的。页数 > 1 时那串东西
+          # `JSON.parse` 直接抛（实测过：`[{"body":"a"}]\n[{"body":"b"}]`）。
+          # 所以分页要自己接：`--paginate` 只用来把页取全，用 `-q` 把每页拼成
+          # 一个**流式**的 JSON 数组再整体 slurp。
+          #
+          # 分页不是可选的：评论可能上百条，锁评论未必在前 30 条里
+          # （这次事故那个 PR 上就有 26 条 review、60+ 条噪音）。
+          # 漏读的后果是「有锁却判成没有锁」——静默失效。
+          #
+          # 拼失败（网络、权限）时落到 `[]`，也就是「没有锁」，见上面那段。
+          BODY=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
+                   -q '[.[] | {body: .body}]' 2>/dev/null \
+                 | jq -s 'add // []' 2>/dev/null) || BODY=""
+          [ -n "$BODY" ] || BODY='[]'
+
+          # **多行/含特殊字符的值必须用 heredoc 定界符写**，不能写 `comments=$BODY`：
+          # $GITHUB_OUTPUT 是一行一条的格式，值里带换行会让 GitHub 直接拒掉这一步
+          # （报 "Invalid format"）。而评论体里**一定有换行**——那正是它的用处。
+          # 定界符用一个不会出现在 JSON 里的串。
+          {
+            echo "comments<<__LOCK_EOF__"
+            echo "$BODY"
+            echo "__LOCK_EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 判这次推送有没有让在飞的评审作废
+        if: github.event.action == 'synchronize'
+        uses: $/.github/actions/review-gate-lock
+        with:
+          # **before 和 after 都必须是 caller 那次 synchronize 事件里的值**：
+          # 判「作废」靠的是拿锁的 base 比 before（被推掉的那一版），
+          # 不是比 after——推送之后 head 已经变了，拿它比永远不等。
+          base: ${{ github.event.before }}
+          head: ${{ github.event.pull_request.head.sha }}
+          # **快照，不是现读**：同 qa-gate/action.yml 里那段注释，事件发出来之后
+          # 现读拿到的已经不是当时那一份。
+          previous-labels: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          comments: ${{ steps.lock.outputs.comments }}
+        id: decide
+
+      # 钉死 head.sha（和上面那条通过检查同一个理由）：这次推送之后的 head。
+      # 写不上去就是 job 红 → 新 SHA 上没有 `review` → PR 停在
+      # "Expected — waiting for status" → **拦住，不是放行**。
+      - name: 在新 head 上写 review commit status
+        if: github.event.action == 'synchronize'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          BODY: ${{ steps.decide.outputs.body_path }}
+        run: gh api "repos/$REPO/statuses/$SHA" --input "$BODY"
+
+      # 锁是**超时**释放的，不是评审者放的——要留一条痕。
+      # 不留的话「锁自己消失了」会变成新的静默失败：作者看到一个绿灯，
+      # 却不知道那是「没人审」还是「审的人崩了」。
+      - name: 超时释放要留痕
+        if: github.event.action == 'synchronize' && steps.decide.outputs.release_expired == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        # 摘标签 + 说明为什么摘。走 GITHUB_TOKEN 不会再触发新的 run，不会绕成环。
+        # **`|| true` 是刻意的**：这一步失败不该把整个 job 打红——job 红了意味着
+        # 「检查没写上」，而上面那条检查其实已经写成功了。留痕失败是次要的，
+        # 让它把检查的存在性拖下水才是本末倒置。
+        run: |
+          gh api -X DELETE "repos/$REPO/issues/$PR/labels/review%2Fin-flight" || true
+          gh api "repos/$REPO/issues/$PR/comments" \
+            -f body="评审锁已**超时自动释放**（评审者没有自己放锁，多半是评审中断了）。这一版不再受它保护。见 [$RUN_URL]($RUN_URL)。" || true

@@ -9,6 +9,7 @@
 | `.github/workflows/qa-gate.yml` | 可复用工作流 | caller 调它 |
 | `.github/workflows/labels-sync.yml` | 可复用工作流 | caller 调它 |
 | `.github/actions/qa-gate/` | 组合动作 + 判定脚本 + 它的测试 | **不直接用**，由上面那份工作流调 |
+| `.github/actions/review-gate-lock/` | 组合动作 + **PR 写锁判定** + 它的测试 | **不直接用**，由 `review-gate.yml` 调 |
 | `.github/actions/labels-sync/` | 组合动作 + 同步脚本 + 它的测试 + **共享的标签清单** | **不直接用**，由上面那份工作流调 |
 | `.github/actions/docs-only/` | 组合动作 + 纯文档判定 + 它的测试 | **各仓的 workflow 直接 `uses:` 它**，当成一个步骤用 |
 | `shared/` | **第二层的源文件**：必须躺在各仓里才会被读到的那几份脚本与它们的测试 | 各仓 `node scripts/vendor-infra.js --sync <tag>` 拉过去。**落点按清单逐份记**，不是统一放一个目录：脚本落 `scripts/`，`pre-commit` 落 `.githooks/` |
@@ -125,17 +126,22 @@ qa-gate 在每个消费仓上都跑不起来**，`qa` 这个必需检查永远�
 name: review-gate
 on:
   pull_request_target:
-    types: [labeled]
+    # labeled 是「评审通过」那条路；
+    # **synchronize 是 PR 写锁那条路**——推了新 commit 时判它有没有让在飞的评审作废。
+    # 两条都不能少，理由见下面「PR 写锁」那一节。
+    types: [labeled, synchronize]
 permissions: {}
 concurrency:
   group: review-gate-${{ github.event.pull_request.number }}
   cancel-in-progress: false
 jobs:
   gate:
-    if: github.event.label.name == 'review-passed'
+    # 标签事件只认 review-passed，别的标签连 runner 都不起（账单前提，见上面）；
+    # **synchronize 不是标签事件，必须一起放行**——漏了它这把锁永远不会跑。
+    if: github.event.label.name == 'review-passed' || github.event.action == 'synchronize'
     permissions:
-      statuses: write       # 写 `review` 这个 commit status
-      pull-requests: write  # 摘标签
+      statuses: write       # 写 `review` 这个 commit status（两条路都写）
+      pull-requests: write  # 摘标签、读锁评论
     uses: GinkgoLeafLab/dev-infra/.github/workflows/review-gate.yml@v1.2.0
 ```
 
@@ -277,6 +283,48 @@ uses: GinkgoLeafLab/dev-infra/.github/workflows/review-gate.yml@main   # ❌
 
 `@main` 意味着这里一次未经各仓评审的改动**当场在所有仓生效**。
 `{ref}` 可以是 SHA、tag 或分支名，我们用 tag。
+
+## PR 写锁：评审在飞时，让「结论作废」当场可见
+
+**要解决的问题**：现有两条机制（`review` / `qa` 这两个 commit status）都只回答
+「这个 SHA **通过**了吗」，而且都在评审**结束之后**才写。**没有人回答「有人正在审吗」**
+——于是评审在跑的那十几分钟里，作者看到已发出的必修就改、就推，
+评审的目标 SHA 当场过期、这一轮结论作废，只能再派一轮。
+
+这不是假设：`GTO-Trainer#182`（一份**纯文档、零代码**的方案文档）因此走了 **9 轮**评审，
+**其中两轮已判「通过」，都因为作者随后推了新 commit 而作废**。第一次作废作者知道；
+更早一次落在旧 SHA 上，作者是**事后自己算出来的**。
+
+**它做什么**：评审者在开始评审时打 `review/in-flight` 标签，并按固定格式留一条评论
+写明 `base=<SHA>` / `holder=` / `exp=<epoch 秒>`。推新 commit 时 `review-gate` 读这把锁，
+**如果被推掉的那一版正是评审在审的那一版**，就在新 head 上写一条 **`failure` 的 `review`**
+检查，说明结论已作废。
+
+**它不做什么（这一条比它做什么更重要）**：
+
+- **它不阻止 push，也阻止不了。** 实调过 `GET /repos/GinkgoLeafLab/GTO-Trainer/rulesets`
+  （2026-09-20）：ruleset 只覆盖 `~DEFAULT_BRANCH`，而 PR 的提交推在**特性分支**上；
+  而且必需检查的语义是「不能**合并**」不是「不能 push」——官方文档
+  *Available rules for rulesets* 原话是 "all required status checks must pass before
+  collaborators can **merge** changes into the branch or tag"。
+  所以要的不是「拦住」，而是**让那件事当场上报**——把「你的结论已经作废了」
+  从作者事后自己算，变成一条当场变红的必需检查。
+- **它不引入第二条必需检查。** `context` 仍然是 `review`——「结论作废」就是
+  `review` 这个检查自己的结论，凭空多一条不必需的检查只会没人看。
+
+**三个已知边界，写下来而不是让它静默**：
+
+1. **锁依赖评审者自觉取锁。** 忘记取锁 = 没有锁 = 回到今天的行为（**不会更糟**）。
+   这是刻意的失败方向。
+2. **读不到锁时一律当作「没有锁」。** 评论取不到、格式写坏、标签没建（GitHub 对打一个
+   不存在的标签是**静默不打**）都会落到这一支。**失败方向是少一层保护，
+   不是误拦 PR**——锁挂了不能让所有 PR 合不了。注意这和 `qa-gate` 是**反的**：
+   那边读不到就必须拦住，因为那是放行门。
+3. **锁有 TTL，超时自动释放并留一条评论。** 评审 subagent 会崩、会被 interrupt
+   （这次事故的现场反复发生），不回放锁动作锁就永远挂着。超时释放必须留痕，
+   否则「锁自己消失了」会变成新的静默失败。
+
+锁本身的调研、备选与否决理由见 `docs/方案/2026-09-PR-写锁.md`。
 
 ## 改这里的东西之后
 

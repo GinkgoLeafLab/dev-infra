@@ -1,0 +1,78 @@
+name: review-gate lock decide
+description: 判一次推送有没有让在飞的评审结论作废，并给出该写的 review commit status 请求体
+
+# 这个组合动作只做**判定**，不写检查、不发评论、不摘标签——那三件事留在
+# .github/workflows/review-gate.yml 里，理由与 qa-gate 那份完全相同
+# （`always()` 的语义与步骤顺序在 job 那一层是确定的，而且写检查要
+# `secrets.GITHUB_TOKEN`，**组合动作根本读不到 secrets 上下文**）。
+#
+# 它存在的全部理由是：判定逻辑是一段**有测试钉着的 node 脚本**，而脚本必须真的躺在
+# runner 的磁盘上才跑得起来（可复用工作流本身带不了文件）。判定为什么不能写在 YAML 里、
+# 以及这把锁**不做什么**（它拦不住 push，也本来就拦不住），见同目录 lock.js 顶部。
+
+inputs:
+  base:
+    description: >-
+      这次推送**之前**的 head（synchronize 事件的 before）。
+      判「作废」靠的是它和锁声明的 base 比对，**不是**拿锁的 base 去比推送后的 head
+      ——后者永远不等（推送之后 head 已经变了），会让这把锁安静地什么都不做。
+    required: true
+  head:
+    description: 这次推送**之后**的 head（synchronize 事件的 after，等于 head.sha）
+    required: true
+  previous-labels:
+    description: >-
+      事件快照里的标签名 JSON 数组。**是快照不是现读**——同 qa-gate/action.yml 里那段
+      注释：事件一旦发出来，现读拿到的已经不是当时那一份。
+    required: true
+  comments:
+    description: >-
+      这个 PR 的评论 JSON 数组（workflow 用 `gh api` 取回后原样喂进来）。
+      锁的元数据（base / holder / 到期时间）只活在这条评论里，见 lock.js 顶部。
+      **取不到时传 `[]`**：判定会当作「没有锁」——失败方向是少一层保护，不是误拦 PR。
+    required: false
+    default: "[]"
+  now:
+    description: 当前 epoch 秒，用来判 TTL。不传就取 runner 的本机时间；测试才需要注入
+    required: false
+    default: ""
+
+outputs:
+  body_path:
+    description: 写着 commit status 请求体的文件路径，交给 `gh api --input`
+    value: ${{ steps.decide.outputs.body_path }}
+  release_expired:
+    description: '"true" 时锁是**超时**自动释放的，workflow 要留一条痕说明这件事'
+    value: ${{ steps.decide.outputs.release_expired }}
+  conclusion:
+    description: '"ok" / "voided" / "stale"，给 workflow 决定要不要额外做点什么'
+    value: ${{ steps.decide.outputs.conclusion }}
+
+runs:
+  using: composite
+  steps:
+    # 走环境变量进 node，一个值都不拼进 shell：SHA 来自事件 payload、评论是外部文本，
+    # 拼进命令行就是注入口子（这套仓库里每一处都这么写，别开例外）。
+    #
+    # 判定失败（SHA 不像 SHA、JSON 坏了）就非零退出：step 红 → 这个 SHA 上没有 `review`
+    # → PR 停在 "Expected — waiting for status"，**拦住，不是放行**。
+    #
+    # $GITHUB_ACTION_PATH 是这个动作自己所在的目录，**不是**工作区——
+    # 这条路上一次 checkout 都不做。
+    - id: decide
+      shell: bash
+      env:
+        LOCK_HEAD: ${{ inputs.head }}
+        LOCK_BEFORE: ${{ inputs.base }}
+        LOCK_PRESENT: ${{ contains(fromJSON(inputs.previous-labels), 'review/in-flight') }}
+        LOCK_COMMENTS: ${{ inputs.comments }}
+        LOCK_NOW: ${{ inputs.now }}
+        LOCK_TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      # node 用 runner 自带的：脚本零依赖、只用 fs/path。不加 setup-node 的理由同 qa-gate。
+      #
+      # `shell: bash` 在组合动作里是 `bash --noprofile --norc -eo pipefail`，
+      # 所以 node 一非零退出，下面那行 echo 就不会执行、body_path 是空的，
+      # 工作流那边的写检查步骤也就跑不了——**拦住，不是放行**。
+      run: |
+        node "$GITHUB_ACTION_PATH/lock.js" > "$RUNNER_TEMP/review-lock.json"
+        echo "body_path=$RUNNER_TEMP/review-lock.json" >> "$GITHUB_OUTPUT"
