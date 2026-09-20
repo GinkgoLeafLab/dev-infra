@@ -11,18 +11,39 @@ name: review-gate (reusable)
 # caller 必须自己提供这三样，**一样都不能搬进来**
 # ---------------------------------------------------------------------------
 #
-# 1. `on: pull_request_target: types: [labeled]`
+# 1. `on: pull_request_target: types: [labeled, synchronize]`
 #    可复用工作流没有自己的触发器，事件永远来自 caller。
 #    **必须是 pull_request_target 不是 pull_request**：前者的定义取自默认分支，
 #    后者能让一个 PR 改写自己那份 caller 来放行自己。
 #
-# 2. **job 级的 `if: github.event.label.name == 'review-passed'`**
+#    **两个事件各走一条路，缺一条那条路就永远不跑，而且不报错**：
+#
+#    | 事件 | 这份文件里做什么 |
+#    |---|---|
+#    | `labeled` + `review-passed` | 在 head SHA 上写 `review` = success（评审通过） |
+#    | `synchronize`（推了新 commit） | 读 PR 写锁，判这次推送有没有让在飞的评审结论作废 |
+#
+#    **`synchronize` 漏了的后果**：PR 写锁那条路（本仓 v1.11.0 加的）永远不会执行。
+#    它防的正是「作者在评审跑的时候推了新 commit、这一轮结论作废」——
+#    `GTO-Trainer#182` 一份纯文档走了 9 轮、两轮已判「通过」后作废，就是这件事。
+#    少了它没有任何报错，那把锁只是安静地不存在。
+#
+# 2. **job 级的 `if:`，两半都要**：
+#
+#    ```yaml
+#    if: github.event.label.name == 'review-passed' || github.event.action == 'synchronize'
+#    ```
+#
 #    这一条是**账单前提，不是过滤器**：job 级的 if 为 false 时 runner 根本不会起、
 #    不计分钟数（GitHub 员工在官方社区论坛 orgs/community discussion #26456 的原话：
 #    "those workflows never start up a runner, so they do not count towards the
 #    included minutes"，**来源等级低于定价页正文**）。
 #    搬进这份文件就变成「起了 runner 再判断」——功能完全正常，只有账单变了，
 #    而且没有任何症状。别搬。
+#
+#    **后半句是最容易漏的一处**：`synchronize` **不是标签事件**，所以
+#    `github.event.label.name` 是 `null`——只写前半句的话，那个事件会被整个挡在门外。
+#    前两条（`types` 加了、`uses:` 也升了）看上去「什么都配好了」，而这一行让它们全白做。
 #
 # 3. `permissions: { statuses: write, pull-requests: write }` 写在**调用这份文件的那个 job 上**
 #    官方原话："If `jobs.<job_id>.permissions` is not specified in the calling job,
@@ -32,11 +53,17 @@ name: review-gate (reusable)
 #    ——所以在这里写 permissions 是没用的：给多了升不上去，给少了反而是降级。
 #    caller 漏写的表现是这个 job 403 变红、检查写不上、PR 被拦住——**失败方向是安全那边**。
 #
+#    **`pull-requests: write` 现在担两件事**：摘 `review-passed` 标签，
+#    以及 PR 写锁那条路上**读 PR 的评论**（锁的元数据住在一条评论里）。
+#    少了它，`synchronize` 那条路会 403 变红 → 新 SHA 上没有 `review` → PR 被拦住。
+#    （拉取本仓的组合动作不走这枚 token，所以**不需要 `contents`**。）
+#
 # 这份文件为什么读得到 caller 的事件：官方原话
 # "When a reusable workflow is triggered by a caller workflow, the `github` context
 # is always associated with the caller workflow."
 # 以及 "The called workflow is automatically granted access to `github.token` and
-# `secrets.GITHUB_TOKEN`."——所以下面那些 github.event.* 取到的是 caller 那次 labeled 事件，
+# `secrets.GITHUB_TOKEN`."——所以下面那些 github.event.* 取到的是 **caller 触发这次的那一个事件**
+# （`labeled` 或 `synchronize`，这正是上面第 1、2 条要按事件分流的原因），
 # 而且不需要 caller 写 `secrets: inherit`。
 #
 # ---------------------------------------------------------------------------
