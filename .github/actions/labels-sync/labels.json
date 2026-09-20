@@ -13,6 +13,7 @@
   { "name": "status/not-a-bug", "color": "cfd3d7", "description": "关闭原因细分：刻意如此 / 无法复现 / 判定为误解" },
 
   { "name": "review-passed", "color": "478e25", "description": "评审通过的一次性信号：review-gate 拿它在 head SHA 上写 review 检查，然后自己摘掉" },
+  { "name": "review/in-flight", "color": "fbca04", "description": "写锁：评审正在审这个 PR 的当前 head。挂着它推新 commit 会让这一轮结论作废，review-gate 当场把 review 检查写成失败" },
 
   { "name": "documentation", "color": "0075ca", "description": "Improvements or additions to documentation" },
   { "name": "duplicate", "color": "cfd3d7", "description": "This issue or pull request already exists" },

@@ -3,11 +3,17 @@ name: test
 # 这个仓库装的东西一旦坏掉，**是所有消费仓的门一起坏**，而且多数失效是静默的
 # （判定判反了 → 一个标了「必须测」的 PR 拿到绿检查）。所以这里必须有一条自己的测试。
 #
-# 它跑两类套件，清单以下面的 steps 为准。一类是第一层的（qa-gate、labels-sync
-# 与 docs-only）：既验各自的判定/同步逻辑，
+# 它跑两类套件，清单以下面的 steps 为准。一类是第一层的（qa-gate、labels-sync、
+# review-gate-lock 与 docs-only）：既验各自的判定/同步逻辑，
 # 也把接线本身验一遍（不许加 checkout、组合动作按 `$/` 自引用同仓的自己、
 # 脚本与清单走 $GITHUB_ACTION_PATH；docs-only 那份是把 action.yml 里那段 run
-# 抽出来真跑一遍）。理由逐条写在那三份文件里。
+# 抽出来真跑一遍）。理由逐条写在那四份文件里。
+#
+# **review-gate-lock 那一份的失效方向要单独说**：它判错的后果是「该报的
+# 评审作废没报」，PR 上的 `review` 照常绿着、作者以为结论还算数——
+# 那正是 GTO-Trainer#182 走了 9 轮的那个事故原样复发，且没有症状。
+# 它钉得最重的一条是**比对的方向**：判作废要拿锁的 base 比**被推掉的那一版**，
+# 写成比推送后的 head 就永远不等，整把锁安静地什么都不做。
 #
 # 另一类是 `shared/` 里第二层那几份源文件自带的测试。各消费仓同步过去之后**也会跑**
 # （那几份 *.test.js 是跟着一起同步的，落在各仓自己的套件清单里），
@@ -65,6 +71,13 @@ jobs:
       - name: 标签同步
         if: always()
         run: node .github/actions/labels-sync/labels.test.js
+
+      # 这一条也验接线：锁标签必须在共享清单里（GitHub 对打一个不存在的标签是
+      # **静默不打**——漏了它的表现是「评审者打了标签、标签根本没上去、
+      # 于是永远判没有锁」，整把锁形同虚设而且没有症状）。
+      - name: PR 写锁
+        if: always()
+        run: node .github/actions/review-gate-lock/lock.test.js
 
       # 这一条会在临时目录里 git init 一个真仓库、真的提交几次——
       # `-z` 与 `--no-renames` 那两条只有拿真 git 跑才测得出来，纯函数测不到。
