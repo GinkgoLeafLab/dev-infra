@@ -261,8 +261,10 @@ jobs:
         run: gh api "repos/$REPO/statuses/$SHA" --input "$BODY"
 
       # 锁是**超时**释放的，不是评审者放的——要留一条痕。
-      # 不留的话「锁自己消失了」会变成新的静默失败：作者看到一个绿灯，
+      # 不留的话「锁自己消失了」会变成新的静默失败：作者只看到 `review` 缺席，
       # 却不知道那是「没人审」还是「审的人崩了」。
+      # （超时释放走的是 OK 那一档，上面那一步因此什么都不写；
+      #   **而这一步的 `if` 不看 `has_body`**，所以留痕照跑。）
       - name: 超时释放要留痕
         if: github.event.action == 'synchronize' && steps.decide.outputs.release_expired == 'true'
         env:
