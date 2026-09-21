@@ -111,7 +111,11 @@ function e2e(variant, consumerPkgJson) {
     try {
       cp.execFileSync(process.execPath, [path.join(dir, "vendor/dev-infra/shared/setup-hooks.js")],
         { cwd: dir, encoding: "utf8" });
-    } catch (e) { setupWhy = ((e.stderr || "") + (e.stdout || "")).trim().split("\n").pop(); }
+    } catch (e) {
+      /* 挑含 Error 的那一行：stderr 末尾是 node 的版本横幅，拿它会让人以为是 node 坏了 */
+      const lines = ((e.stderr || "") + (e.stdout || "")).trim().split("\n");
+      setupWhy = lines.find((l) => /Error/.test(l)) || lines.pop();
+    }
     check(`${variant}：setup-hooks 跑成` + (setupWhy ? `（${setupWhy}）` : ""), setupWhy, null);
 
     /* core.hooksPath 没设上时 git config 退出码非零——容忍掉，交给下面的比对失败。 */
