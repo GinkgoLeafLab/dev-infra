@@ -27,7 +27,7 @@
 
 | 在这个仓库里 | 不在，也不该搬进来 |
 |---|---|
-| 第一层的可复用工作流与组合动作 | **第二层在各仓的那一半**：`.gitmodules` 里那条 gitlink（挂哪个 commit）、把 `vendor/dev-infra/shared/guard-branch.test.js` 挂进 `npm test` 的接线、各仓自己的 `.gitattributes` 规则——它们**逐仓不同**，而且必须待在那个仓里才生效 |
+| 第一层的可复用工作流与组合动作 | **第二层在各仓的那一半**：树里那条 gitlink（`160000`，记着挂在哪个 commit——`.gitmodules` 只记 path 与 url，不记 commit）、把 `vendor/dev-infra/shared/guard-branch.test.js` 挂进 `npm test` 的接线、各仓自己的 `.gitattributes` 规则——它们**逐仓不同**，而且必须待在那个仓里才生效 |
 | **第二层的源文件**（`shared/`） | **第三层**（仓库设置的只读审计）整层 |
 
 ## 和 `GinkgoLeafLab/.github` 是两回事，别混
@@ -396,7 +396,9 @@ PreToolUse 把非零退出当 non-blocking error——**守卫静默放行**；
 这不需要额外一层校验去保证——submodule 挂的是**一个具体 commit**，各仓拿到的永远是
 那个 commit 上 `shared/` 长什么样，不会因为这个仓库后来加了文件就自动多出来。
 **要新文件落地，消费仓必须把自己的 submodule 指针挪到包含它的那个 commit**，
-这是显式的一步（改 `.gitmodules` 指向的 commit + 提交那次指针变化），不是隐式发生的。
+这是显式的一步（在消费仓里把 submodule 的检出切到那个 commit，再提交那次 gitlink 变化），
+不是隐式发生的。**记着 commit 的是树里那条 `160000` 的 gitlink，不是 `.gitmodules`**——
+后者只有 path 与 url。
 
 反过来，消费仓也没法「只拿一部分」：submodule 只能整体挂在某个 commit 上，
 没有「拿了」和「刻意不拿」这种按文件取舍——一个仓要么挂着这个 submodule
