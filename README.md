@@ -364,6 +364,16 @@ uses: GinkgoLeafLab/dev-infra/.github/workflows/review-gate.yml@main   # ❌
 它做得成组合动作。`docs-only` 原来在这儿，正是按这条判据搬走的
 （`qa-gate.js` 更早一步，各仓现在连那个文件都没有了）。
 
+**`shared/package.json` 不是 npm 项目声明，是模块系统声明**（全文件只有
+`{"type":"commonjs"}` 一行）。这一层的文件都是 CommonJS，而消费仓是
+**以路径直接 `node <文件>`** 调它们的——node 按**离文件最近的 package.json**
+决定模块系统，往上找到的第一份是消费仓自己那份。消费仓是 `"type": "module"`
+时（dsh 插件仓都是），没有这一行，`require` 全部 ReferenceError：
+PreToolUse 把非零退出当 non-blocking error——**守卫静默放行**；
+`prepare` 在 npm install 时直接炸掉。失效只发生在消费仓那边、本仓一切正常，
+所以由 `submodule-shape.test.js` 钉着（形态断言 + ESM 消费仓的端到端）。
+**它管整个 `shared/` 目录，往这层加文件不用动它。**
+
 所以这一层**有副本**，而这里是副本的唯一来处。
 
 **机制落地了，但只落在一个仓。** `GTO-Trainer` 已经接上（它的 `npm test` 里有这条），

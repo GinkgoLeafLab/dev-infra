@@ -56,14 +56,41 @@ const inDir = git("ls-files", "--", "shared/githooks/").split("\n").filter(Boole
   .map((p) => p.replace(/^shared\/githooks\//, "")).sort();
 check("shared/githooks/ 里只有白名单上的那些", inDir.join(","), HOOKS_ALLOWED.slice().sort().join(","));
 
-/* —— 4. 端到端：真的挂成 submodule，真的跑一次提交 ——
+/* —— 4. shared/ 自己声明模块系统 ——
+   shared/ 下全是 CommonJS（require），但消费仓是**以路径直接 `node <文件>`** 调它们的
+   （pre-commit 钩子、npm 的 prepare、PreToolUse 入口）——node 按**离文件最近的
+   package.json** 决定模块系统，而沿着目录往上找到的第一份是**消费仓自己**那份。
+   消费仓是 `"type": "module"` 时（dsh 插件仓都是），这里的每一份都会被当成 ESM，
+   `require` 当场 ReferenceError。PreToolUse 把非零退出当 non-blocking error——
+   **命令照常执行，守卫静默放行**；prepare 在 npm install 时直接炸掉。
+   所以模块系统必须由 shared/ 自己声明，不许继承消费仓的默认值。
+   失效只发生在消费仓那边、本仓一切正常——正是这份测试管的那一类事。 */
+const SHARED_PKG = "shared/package.json";
+const HAS_SHARED_PKG = git("ls-files", "--", SHARED_PKG).trim() !== "";
+check(`${SHARED_PKG} 在索引里存在`, HAS_SHARED_PKG, true);
+/* 后两条都要是**干净的失败**，不能让任何一条抛出去把后面的端到端那一节整个跳过——
+   那正是变异验证要看的东西。所以：文件不在时条件化（cat-file 会抛），
+   文件在但内容不是合法 JSON 时也自己接住（`JSON.parse` 会抛 SyntaxError）。 */
+let sharedType = null;
+if (HAS_SHARED_PKG) {
+  try {
+    sharedType = JSON.parse(git("cat-file", "blob", ":" + SHARED_PKG)).type ?? null;
+  } catch (e) { sharedType = `(读不出来：${e.message.split("\n")[0]})`; }
+}
+check(`${SHARED_PKG} 是合法 JSON 且声明 commonjs`, sharedType, "commonjs");
+
+/* —— 5. 端到端：真的挂成 submodule，真的跑一次提交 ——
    前面三条验的是**形态**（模式、行尾、目录白名单）。形态对、接线错，是这套东西
    已经栽过一次的地方：钩子从 shared/ 挪进 shared/githooks/ 那一版里，
    pre-commit 里那行 `../scripts/guard-branch.js` 和 setup-hooks.js 里写死的
    ".githooks" 都没跟着改，**而三条形态断言全绿**。
    所以这一条不问形状，直接问结果：挂上去、跑 setup-hooks、然后真的提交一次，
    守卫拦不拦得住。 */
-function e2e() {
+/* 两种消费仓都要跑一遍：不带 package.json 的（CJS 默认，今天三个消费仓的形状）
+   和 "type": "module" 的（dsh 插件仓的形状）。后者是 shared/package.json 存在
+   的全部理由——没有那一行，ESM 消费仓里下面每一条都会红（实测过：
+   setup-hooks 第一步就 ReferenceError，守卫经 non-blocking error 静默放行）。 */
+function e2e(variant, consumerPkgJson) {
   const fs2 = require("fs"), os = require("os"), cp = require("child_process");
   const dir = fs2.mkdtempSync(path.join(os.tmpdir(), "smwire-"));
   /* protocol.file.allow：git 2.38 起默认禁止从本地路径加 submodule（CVE-2022-39253）。
@@ -75,14 +102,32 @@ function e2e() {
     G(dir, "init", "-q", "-b", "main");
     fs2.writeFileSync(path.join(dir, "a.txt"), "1\n");
     G(dir, "add", "-A"); G(dir, "commit", "-qm", "init");
+    if (consumerPkgJson) {
+      fs2.writeFileSync(path.join(dir, "package.json"), JSON.stringify(consumerPkgJson) + "\n");
+      G(dir, "add", "-A"); G(dir, "commit", "-qm", "声明消费仓的模块系统");
+    }
     /* 挂在一个**有深度的**路径下：写死 ".githooks" 那种 bug 在浅路径上可能碰巧不暴露 */
     G(dir, "submodule", "add", "-q", ROOT, "vendor/dev-infra");
     G(dir, "commit", "-qm", "挂上 submodule");
 
-    cp.execFileSync(process.execPath, [path.join(dir, "vendor/dev-infra/shared/setup-hooks.js")],
-      { cwd: dir, encoding: "utf8" });
-    const hooksPath = G(dir, "config", "core.hooksPath").trim();
-    check("setup-hooks 把 core.hooksPath 指进了 submodule", hooksPath, "vendor/dev-infra/shared/githooks");
+    /* setup-hooks 跑不起来**本身就是要测出来的事**（ESM 消费仓里没了
+       shared/package.json 就是这个形状：ReferenceError）。所以包成干净的断言
+       失败，不包的话异常逃出 e2e，后面三条提交检查连跑的机会都没有。 */
+    let setupWhy = null;
+    try {
+      cp.execFileSync(process.execPath, [path.join(dir, "vendor/dev-infra/shared/setup-hooks.js")],
+        { cwd: dir, encoding: "utf8" });
+    } catch (e) {
+      /* 挑含 Error 的那一行：stderr 末尾是 node 的版本横幅，拿它会让人以为是 node 坏了 */
+      const lines = ((e.stderr || "") + (e.stdout || "")).trim().split("\n");
+      setupWhy = lines.find((l) => /Error/.test(l)) || lines.pop();
+    }
+    check(`${variant}：setup-hooks 跑成` + (setupWhy ? `（${setupWhy}）` : ""), setupWhy, null);
+
+    /* core.hooksPath 没设上时 git config 退出码非零——容忍掉，交给下面的比对失败。 */
+    let hooksPath = "";
+    try { hooksPath = G(dir, "config", "core.hooksPath").trim(); } catch (e) { /* 交给比对 */ }
+    check(`${variant}：setup-hooks 把 core.hooksPath 指进了 submodule`, hooksPath, "vendor/dev-infra/shared/githooks");
 
     /* 在 main 上提交——守卫必须拦下，而且要是**守卫拦的**，不是「找不到文件」那种报错 */
     fs2.writeFileSync(path.join(dir, "a.txt"), "2\n");
@@ -90,17 +135,19 @@ function e2e() {
     let blocked = false, why = "";
     try { G(dir, "commit", "-qm", "该被拦下"); }
     catch (e) { blocked = true; why = ((e.stdout || "") + (e.stderr || "")).trim(); }
-    check("在 main 上提交被拦下", blocked, true);
+    check(`${variant}：在 main 上提交被拦下`, blocked, true);
     /* 这一条是关键：钩子找不到 guard-branch.js 时 node 报的是 MODULE_NOT_FOUND，
-       那也会让提交失败——**看起来也像「拦住了」**。所以要认守卫自己的话。 */
-    check("拦它的是守卫本身，不是「找不到文件」",
-      /受保护分支|不允许|守卫/.test(why) && !/Cannot find module|MODULE_NOT_FOUND/.test(why), true);
+       那也会让提交失败——**看起来也像「拦住了」**。所以要认守卫自己的话。
+       ESM 消费仓里没有 shared/package.json 时撞的是另一条：require is not defined——
+       同样不是守卫自己的话，同样不许混过去。 */
+    check(`${variant}：拦它的是守卫本身，不是「找不到文件」或「模块系统错了」`,
+      /受保护分支|不允许|守卫/.test(why) && !/Cannot find module|MODULE_NOT_FOUND|require is not defined|ERR_REQUIRE_ESM/.test(why), true);
 
     /* 反向：特性分支上要放行。只会拦不会放的守卫等于把仓库锁死。 */
     G(dir, "switch", "-q", "-c", "feat/x");
     let ok = true;
     try { G(dir, "commit", "-qm", "特性分支上该放行"); } catch (e) { ok = false; }
-    check("特性分支上放行", ok, true);
+    check(`${variant}：特性分支上放行`, ok, true);
   } finally {
     fs2.rmSync(dir, { recursive: true, force: true });
   }
@@ -109,7 +156,8 @@ if (process.platform === "win32") {
   /* 出声地跳过：钩子是 sh 脚本，这个仓的 CI 只有 ubuntu。静默跳过才是问题。 */
   console.log("  （端到端那一节在 Windows 上跳过：钩子要 sh）");
 } else {
-  e2e();
+  e2e("CJS 消费仓", null);
+  e2e("ESM 消费仓", { type: "module" });
 }
 
 console.log(`submodule 形态：${pass} 通过 / ${fail} 失败`);
