@@ -104,9 +104,19 @@ function e2e(variant, consumerPkgJson) {
     G(dir, "submodule", "add", "-q", ROOT, "vendor/dev-infra");
     G(dir, "commit", "-qm", "挂上 submodule");
 
-    cp.execFileSync(process.execPath, [path.join(dir, "vendor/dev-infra/shared/setup-hooks.js")],
-      { cwd: dir, encoding: "utf8" });
-    const hooksPath = G(dir, "config", "core.hooksPath").trim();
+    /* setup-hooks 跑不起来**本身就是要测出来的事**（ESM 消费仓里没了
+       shared/package.json 就是这个形状：ReferenceError）。所以包成干净的断言
+       失败，不包的话异常逃出 e2e，后面三条提交检查连跑的机会都没有。 */
+    let setupWhy = null;
+    try {
+      cp.execFileSync(process.execPath, [path.join(dir, "vendor/dev-infra/shared/setup-hooks.js")],
+        { cwd: dir, encoding: "utf8" });
+    } catch (e) { setupWhy = ((e.stderr || "") + (e.stdout || "")).trim().split("\n").pop(); }
+    check(`${variant}：setup-hooks 跑成` + (setupWhy ? `（${setupWhy}）` : ""), setupWhy, null);
+
+    /* core.hooksPath 没设上时 git config 退出码非零——容忍掉，交给下面的比对失败。 */
+    let hooksPath = "";
+    try { hooksPath = G(dir, "config", "core.hooksPath").trim(); } catch (e) { /* 交给比对 */ }
     check(`${variant}：setup-hooks 把 core.hooksPath 指进了 submodule`, hooksPath, "vendor/dev-infra/shared/githooks");
 
     /* 在 main 上提交——守卫必须拦下，而且要是**守卫拦的**，不是「找不到文件」那种报错 */
