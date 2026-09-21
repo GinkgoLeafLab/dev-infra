@@ -1,7 +1,9 @@
 /* 分支守卫：禁止在受保护分支（main/master）上直接提交，禁止把任何东西直推受保护分支。
 
-   **这份文件是从 GinkgoLeafLab/dev-infra 同步进来的，不要手改。**
-   改它去那边走 PR、打 tag，再回来 `node scripts/vendor-infra.js --sync <tag>`。
+   **这份文件是 `GinkgoLeafLab/dev-infra` 的一个 git submodule（挂在 `vendor/dev-infra`）
+   带进来的，不是同步来的副本。** 在消费仓里改它一个字节都进不了消费仓自己的历史——
+   能改的只有 dev-infra 这边的提交，改了也会在下次移动 submodule 指针时被冲掉。
+   要改它去那边走 PR、打新 tag，再回来把这个 submodule 的指针挪到新 tag。
 
    两个入口共用这一份逻辑：
    1. Claude Code 的 PreToolUse hook —— 从 stdin 读 hook JSON，拦住 agent 的 Bash 调用
