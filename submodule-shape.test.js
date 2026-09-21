@@ -66,9 +66,12 @@ check("shared/githooks/ 里只有白名单上的那些", inDir.join(","), HOOKS_
    所以模块系统必须由 shared/ 自己声明，不许继承消费仓的默认值。
    失效只发生在消费仓那边、本仓一切正常——正是这份测试管的那一类事。 */
 const SHARED_PKG = "shared/package.json";
-check(`${SHARED_PKG} 在索引里存在`, git("ls-files", "--", SHARED_PKG).trim() !== "", true);
+const HAS_SHARED_PKG = git("ls-files", "--", SHARED_PKG).trim() !== "";
+check(`${SHARED_PKG} 在索引里存在`, HAS_SHARED_PKG, true);
+/* 文件不存在时第二条也得是**干净的失败**，不能让 cat-file 抛出去把后面的
+   端到端那一节整个跳过——那正是变异验证要看的东西。 */
 check(`${SHARED_PKG} 声明 commonjs`,
-  JSON.parse(git("cat-file", "blob", ":" + SHARED_PKG)).type, "commonjs");
+  HAS_SHARED_PKG && JSON.parse(git("cat-file", "blob", ":" + SHARED_PKG)).type, "commonjs");
 
 /* —— 5. 端到端：真的挂成 submodule，真的跑一次提交 ——
    前面三条验的是**形态**（模式、行尾、目录白名单）。形态对、接线错，是这套东西
