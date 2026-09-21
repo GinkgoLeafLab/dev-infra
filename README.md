@@ -12,7 +12,7 @@
 | `.github/actions/review-gate-lock/` | 组合动作 + **PR 写锁判定** + 它的测试 | **不直接用**，由 `review-gate.yml` 调 |
 | `.github/actions/labels-sync/` | 组合动作 + 同步脚本 + 它的测试 + **共享的标签清单** | **不直接用**，由上面那份工作流调 |
 | `.github/actions/docs-only/` | 组合动作 + 纯文档判定 + 它的测试 | **各仓的 workflow 直接 `uses:` 它**，当成一个步骤用 |
-| `shared/` | **第二层的源文件**：必须躺在各仓里才会被读到的那几份脚本与它们的测试 | 各仓把这个仓库整个当 **git submodule** 挂在 `vendor/dev-infra`；`core.hooksPath` 与 PreToolUse hook 直接指到那个路径下，**不再各自落一份本地副本** |
+| `shared/` | **第二层的源文件**：必须躺在各仓里才会被读到的那几份脚本与它们的测试 | 各仓把这个仓库整个当 **git submodule** 挂在 `vendor/dev-infra`，**不再各自落一份本地副本**。`core.hooksPath` 直接指进 `vendor/dev-infra/shared/githooks`；**PreToolUse hook 不直接指进子模块**，它走各仓自己那份 tracked 的 `scripts/guard-hook.js` 转接——子模块可以是空的，而空的时候 `node <缺失路径>` 是「非零退出、stdout 一个字节都没有」，PreToolUse 把它当 non-blocking error、**命令照常执行**（= 守卫静默放行） |
 | `.github/workflows/test.yml` | 本仓自己的测试，连同 `shared/` 里那份套件 | 不适用 |
 | `submodule-shape.test.js` + `.gitattributes` | 钉住「各仓把这里当 submodule 挂上会拿到什么」 | 不适用 |
 
@@ -27,7 +27,7 @@
 
 | 在这个仓库里 | 不在，也不该搬进来 |
 |---|---|
-| 第一层的可复用工作流与组合动作 | **第二层在各仓的那一半**：树里那条 gitlink（`160000`，记着挂在哪个 commit——`.gitmodules` 只记 path 与 url，不记 commit）、把 `vendor/dev-infra/shared/guard-branch.test.js` 挂进 `npm test` 的接线、各仓自己的 `.gitattributes` 规则——它们**逐仓不同**，而且必须待在那个仓里才生效 |
+| 第一层的可复用工作流与组合动作 | **第二层在各仓的那一半**：树里那条 gitlink（`160000`，记着挂在哪个 commit——`.gitmodules` 只记 path 与 url，不记 commit）、把 `vendor/dev-infra/shared/guard-branch.test.js` 挂进 `npm test` 的接线、那份 `scripts/guard-hook.js` 转接——它们**逐仓不同**，而且必须待在那个仓里才生效 |
 | **第二层的源文件**（`shared/`） | **第三层**（仓库设置的只读审计）整层 |
 
 ## 和 `GinkgoLeafLab/.github` 是两回事，别混
@@ -357,9 +357,10 @@ uses: GinkgoLeafLab/dev-infra/.github/workflows/review-gate.yml@main   # ❌
 都会在每一个消费仓自动生效**。目录里装什么由 `submodule-shape.test.js` 的白名单钉着，
 加一个钩子必须同时改那一行——这个显式性不能丢。
 它们没法做成组合动作，判据是**谁在调它**：这几份的调用方都是各仓本地的一条路径——
-`guard-branch.js` 由 `.claude/settings.json`（PreToolUse hook）与 `core.hooksPath`
-指向的 `shared/githooks/pre-commit` 调用，`setup-hooks.js` 由 `npm prepare` 调用、
-负责把 `core.hooksPath` 指过去——**那几条路都读不到别的仓库**。
+`guard-branch.js` 由两条路调到：`core.hooksPath` 指向的 `shared/githooks/pre-commit`
+直接调，PreToolUse 那条经各仓自己那份 `scripts/guard-hook.js` 转接（**刻意不直接指进
+子模块**，见上面那张表）；`setup-hooks.js` 由 `npm prepare` 调用、负责把 `core.hooksPath`
+指过去——**那几条路都读不到别的仓库**。
 
 反过来也是同一条判据：**只被 CI 的 `run:` 调用的东西不属于这一层**，
 它做得成组合动作。`docs-only` 原来在这儿，正是按这条判据搬走的
