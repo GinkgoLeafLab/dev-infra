@@ -39,8 +39,20 @@ inputs:
 
 outputs:
   body_path:
-    description: 写着 commit status 请求体的文件路径，交给 `gh api --input`
+    description: >-
+      写着 commit status 请求体的文件路径，交给 `gh api --input`。
+      **结论是 OK 时这份文件是空的**——见 `has_body`
     value: ${{ steps.decide.outputs.body_path }}
+  has_body:
+    description: >-
+      `"true"` / `"false"`。结论是 VOIDED / STALE 时才是 `"true"`；
+      OK 时（没有评审在飞、锁读不到、锁超时释放、锁审的就是当前版本）
+      **必须是 `"false"`，调用方据此不写这次的 `review` 检查**，
+      让它在新 SHA 上保持缺席。判据不是 `conclusion` 这个字符串输出，
+      是「`body_path` 指的那个文件是不是非空」——即便调用方漏写这个判断，
+      `gh api --input` 喂给它一个空文件时 GitHub 会因缺 `state` 字段拒掉这次请求，
+      job 照样红、`review` 照样缺席，失败方向不变（拦住，不是放行）
+    value: ${{ steps.decide.outputs.has_body }}
   release_expired:
     description: '"true" 时锁是**超时**自动释放的，workflow 要留一条痕说明这件事'
     value: ${{ steps.decide.outputs.release_expired }}
@@ -73,6 +85,17 @@ runs:
       # `shell: bash` 在组合动作里是 `bash --noprofile --norc -eo pipefail`，
       # 所以 node 一非零退出，下面那行 echo 就不会执行、body_path 是空的，
       # 工作流那边的写检查步骤也就跑不了——**拦住，不是放行**。
+      #
+      # lock.js 在结论是 OK 时刻意让 stdout 保持空（见 lock.js 里 statusBody 的注释）。
+      # has_body 就是照这份文件是不是非空算出来的——**判据落在产出的文件上，
+      # 不是重新问一遍 conclusion**，这样即使调用方少写了消费 has_body 的那个 if，
+      # `gh api --input` 喂给它的是个空文件，GitHub 会因为缺 state 字段拒掉这次请求，
+      # gh api 对非 2xx 默认非零退出，job 照样红、review 照样缺席——拦住，不是放行。
       run: |
         node "$GITHUB_ACTION_PATH/lock.js" > "$RUNNER_TEMP/review-lock.json"
         echo "body_path=$RUNNER_TEMP/review-lock.json" >> "$GITHUB_OUTPUT"
+        if [ -s "$RUNNER_TEMP/review-lock.json" ]; then
+          echo "has_body=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "has_body=false" >> "$GITHUB_OUTPUT"
+        fi

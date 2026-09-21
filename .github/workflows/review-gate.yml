@@ -234,8 +234,25 @@ jobs:
       # 钉死 head.sha（和上面那条通过检查同一个理由）：这次推送之后的 head。
       # 写不上去就是 job 红 → 新 SHA 上没有 `review` → PR 停在
       # "Expected — waiting for status" → **拦住，不是放行**。
+      #
+      # **只在 `has_body == 'true'` 时才跑这一步——结论是 OK 时什么都不写。**
+      # 这条曾经缺过：以前这一步无条件对每次 synchronize 都调 `gh api`，
+      # 而 lock.js 对任何结论（包括「没有评审在飞」）都会吐一份 JSON、
+      # 而且 OK 那一档写的是 `state: "success"`。后果是一个从没派过评审的 PR，
+      # 只要推过一次 commit，`review` 就是绿的——`review` 唯一的保证「缺席即拦」
+      # 就这么被废掉了，而且没有任何症状（实证：GTO-Trainer#186 的 run
+      # `35579432642`，`LOCK_PRESENT: false` 却写出 `state: "success"`；
+      # `GTO-Trainer#191` 又复现了一次）。现在 lock.js 对 OK 不吐任何 JSON，
+      # `has_body` 就是照这一点算出来的（见 review-gate-lock/action.yml）。
+      #
+      # **就算这个 `if` 被人删掉，这一步也不会悄悄放行**：`has_body=false` 时
+      # `body_path` 指向的是一个空文件，`gh api --input` 拿它当请求体发出去，
+      # GitHub 的 statuses 接口缺 `state` 字段会拒掉这次请求（非 2xx），
+      # `gh api` 对非 2xx 默认非零退出（`cli/cli` 的 `pkg/cmd/api/api.go`），
+      # job 照样红、新 SHA 上照样没有 `review`——**拦住，不是放行**，
+      # 判定因此不是只活在这一行 YAML 里。
       - name: 在新 head 上写 review commit status
-        if: github.event.action == 'synchronize'
+        if: github.event.action == 'synchronize' && steps.decide.outputs.has_body == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
