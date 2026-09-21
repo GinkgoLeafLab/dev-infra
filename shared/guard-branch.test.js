@@ -1,7 +1,9 @@
 /* 分支守卫的回归测试：npm run test:guard
 
-   **这份文件是从 GinkgoLeafLab/dev-infra 同步进来的，不要手改。**
-   改它去那边走 PR、打 tag，再回来 `node scripts/vendor-infra.js --sync <tag>`。
+   **这份文件是 `GinkgoLeafLab/dev-infra` 的一个 git submodule（挂在 `vendor/dev-infra`）
+   带进来的，不是同步来的副本。** 在消费仓里改它一个字节都进不了消费仓自己的历史——
+   能改的只有 dev-infra 这边的提交，改了也会在下次移动 submodule 指针时被冲掉。
+   要改它去那边走 PR、打新 tag，再回来把这个 submodule 的指针挪到新 tag。
 
    守卫靠扫命令文本判断，天然有边界。这些用例把边界钉死。
    **表里带「第一版漏判」标记的每一条，都是代码评审实测出来的真漏洞** ——

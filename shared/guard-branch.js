@@ -1,11 +1,18 @@
 /* 分支守卫：禁止在受保护分支（main/master）上直接提交，禁止把任何东西直推受保护分支。
 
-   **这份文件是从 GinkgoLeafLab/dev-infra 同步进来的，不要手改。**
-   改它去那边走 PR、打 tag，再回来 `node scripts/vendor-infra.js --sync <tag>`。
+   **这份文件是 `GinkgoLeafLab/dev-infra` 的一个 git submodule（挂在 `vendor/dev-infra`）
+   带进来的，不是同步来的副本。** 在消费仓里改它一个字节都进不了消费仓自己的历史——
+   能改的只有 dev-infra 这边的提交，改了也会在下次移动 submodule 指针时被冲掉。
+   要改它去那边走 PR、打新 tag，再回来把这个 submodule 的指针挪到新 tag。
 
    两个入口共用这一份逻辑：
-   1. Claude Code 的 PreToolUse hook —— 从 stdin 读 hook JSON，拦住 agent 的 Bash 调用
-   2. .githooks/pre-commit —— 带 --pre-commit 参数，拦住任何绕过 agent 的本地提交
+   1. Claude Code 的 PreToolUse hook —— 从 stdin 读 hook JSON，拦住 agent 的 Bash 调用。
+      **它不直接指这份文件**，走各仓自己那份 tracked 的转接脚本 require 到这儿：
+      子模块可以是空的，而空的时候 `node <缺失路径>` 是「非零退出、stdout 零字节」，
+      PreToolUse 把它当 non-blocking error —— 命令照常执行
+   2. githooks/pre-commit —— 和本文件同层的那个钩子目录，消费仓的 core.hooksPath
+      指着它（按相对位置算，不写死挂载路径）；带 --pre-commit 参数，
+      拦住任何绕过 agent 的本地提交
 
    用 node 而不是 shell：Windows 的 npm 走 cmd，没有 bash。见 CLAUDE.md「运行环境约束」。
 
