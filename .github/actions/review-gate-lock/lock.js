@@ -188,8 +188,23 @@ function decide({ hasLock, lock, pushedHead, previousHead, now }) {
    VOIDED 与 STALE 都落到 `failure`：
      - VOIDED 必须红——那正是要让人当场看见的东西；
      - STALE 也红是**刻意的保守**：那意味着有一个在飞的评审和一个对不上的 head，
-       让人看一眼比让它绿着过去安全。**它是可以合成绿的方向，但我们没合。** */
-const STATE = { [OK]: "success", [VOIDED]: "failure", [STALE]: "failure" };
+       让人看一眼比让它绿着过去安全。**它是可以合成绿的方向，但我们没合。**
+
+   **`OK` 不在这张表里，这是刻意的。** 曾经这里写的是 `[OK]: "success"`——
+   于是「没有评审在飞」的每一次推送都会在新 head 上写一条**绿的** `review`。
+   而 `review` 这个必需检查的全部保证是「缺席即拦」：没写上就停在
+   "Expected — waiting for status"。一旦 OK 也写一条绿的，这条性质对任何
+   推过第二个 commit 的 PR 都不成立了——**一个从没派过评审的 PR，推一次就能拿到绿勾**，
+   而且没有任何症状（merge box 全绿，看起来就像审过了）。
+   实证：`GTO-Trainer#186` 的 run `35579432642`（`synchronize`，`LOCK_PRESENT: false`），
+   写出去的响应体是 `{"state":"success","description":"没有评审在飞","context":"review"}`；
+   `GTO-Trainer#191` 上又复现了一次。方案 `docs/方案/2026-09-PR-写锁.md`「告警」那一行
+   从头到尾只写了「发现结论作废 → 写一条 failure」，**从没说过「OK 也要写点什么」**——
+   这不是设计决定，是实现越过了方案。
+   OK 现在的行为是**什么都不写**，见下面 `statusBody` 里的早退分支：
+   新 SHA 上没有 `review`，它就继续停在 "Expected — waiting for status"，
+   和「这个 PR 还没派过评审」时一模一样——那正是诚实的状态。 */
+const STATE = { [VOIDED]: "failure", [STALE]: "failure" };
 
 /* 描述字段 GitHub 限 140 字符，超了**整个请求会被拒**——那意味着一条本该写上的
    作废警报根本没写上去。抽成函数是为了让它自己也能被断言（同 qa-gate.js）。 */
@@ -208,9 +223,22 @@ function checkDesc(desc) {
    注意 `context` 仍然是 `"review"`——**和 review-gate 通过时写的那个同名**。
    这是刻意的：`review` 是主干的必需检查，而「结论作废」就是 `review` 这个检查
    自己的结论。写成另一个名字（例如 `review-lock`）会凭空多出一条不必需的检查，
-   没人看，也就白做了。 */
+   没人看，也就白做了。
+
+   **`OK` 时 `status` 是 `null`，调用方必须据此不发这次请求**——见 STATE 那段注释。
+   `main()` 靠这个 `null` 让 stdout 保持空；action.yml 再靠「文件是不是空的」
+   决定 `has_body`，工作流那一步只在 `has_body == 'true'` 时才调 `gh api`。
+   这条判定因此**不是只活在 YAML 的 `if` 里**：就算那个 `if` 被删掉，
+   `gh api --input` 喂给它的是一个空文件——GitHub 的 statuses 接口缺 `state`
+   字段会拒绝这次请求（非 2xx），`gh api` 对非 2xx 默认非零退出
+   （`cli/cli` 的 `pkg/cmd/api/api.go`：状态码 > 299 时返回 `cmdutil.SilentError`），
+   job 照样红、新 SHA 上照样没有 `review`——**拦住，不是放行**，和这份文件其余部分
+   同一个失败方向。 */
 function statusBody(input, targetUrl) {
   const d = decide(input);
+  if (d.conclusion === OK) {
+    return { status: null, releaseExpired: d.releaseExpired, conclusion: d.conclusion };
+  }
   const state = STATE[d.conclusion];
   if (!state) throw new Error(`没有对应 commit status state 的结论：${d.conclusion}`);
   const status = { state, context: "review", description: checkDesc(d.desc) };
@@ -258,8 +286,13 @@ function main() {
     },
     process.env.LOCK_TARGET_URL || ""
   );
-  /* 请求体走 stdout，调用方重定向进文件再交给 `gh api --input`。 */
-  process.stdout.write(JSON.stringify(status));
+  /* 请求体走 stdout，调用方重定向进文件再交给 `gh api --input`。
+     **`status` 为 `null`（OK）时刻意什么都不写**——stdout 留空，
+     action.yml 靠这个空文件把 `has_body` 判成 `false`，工作流那一步据此不调
+     `gh api`；新 SHA 上没有 `review`，它就保持缺席，和「还没派过评审」一样。
+     这正是这次要修的洞：以前这里对任何结论都无条件写一份 JSON，
+     OK 写出去的是一条绿的 `success`，把「缺席即拦」这条性质废掉了。 */
+  if (status) process.stdout.write(JSON.stringify(status));
   /* 其余几个输出走 GITHUB_OUTPUT，别和上面那份 JSON 混在一条流里
      （同 qa-gate.js 的分工）。**body_path 由 action.yml 那一步自己写**——
      它才知道 $RUNNER_TEMP 在哪，脚本不该猜。 */

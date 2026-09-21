@@ -155,12 +155,26 @@ const body = statusBody(
 check("context 是 review（和 review-gate 通过时写的是同一个）", body.status.context, "review");
 check("作废时写的是 failure", body.status.state, "failure");
 check("作废时如实报告 conclusion", body.conclusion, VOIDED);
-/* 正常路径也要写成功——必须检查在新 SHA 上缺席会停在
-   "Expected — waiting for status"，PR 永远合不了。 */
+/* —— 这一条是这个套件存在的**第二个**理由（第一个是上面比对的方向）——
+   OK 时必须**什么都不写**，不是写一条 success。
+
+   这条钉的就是 GTO-Trainer#186 / #189 / #191 那个洞：以前这里写的是
+   `okBody.status.state === "success"`——**这条断言本身就是那个 bug 的编码**，
+   它「验证」的正是「没有评审在飞时也写一条绿的检查」这件事，而 `review`
+   唯一的保证是「缺席即拦」。一个从没派过评审的 PR，只要推过一次 commit，
+   `review` 就是绿的，而且没有任何症状。 */
 const okBody = statusBody(
   { hasLock: false, lock: null, pushedHead: B, previousHead: A, now: NOW }, "");
-check("没有锁时写 success（不能缺席）", okBody.status.state, "success");
+check("没有锁（OK）时 status 必须是 null——新 SHA 上什么都不写，让 `review` 保持缺席",
+  okBody.status, null);
+check("没有锁时如实报告 conclusion 为 ok", okBody.conclusion, OK);
 check("没有锁时也不摘锁标签", okBody.releaseExpired, false);
+/* 同一条钉法在「锁超时释放」这个 OK 分支上再验一遍——它也不该写任何东西，
+   只是要报 releaseExpired=true 让调用方留痕（见 lock.js 里 TTL 那段）。 */
+const expiredBody = statusBody(
+  { hasLock: true, lock: findLock(comments(A, "alice", PAST)), pushedHead: B, previousHead: A, now: NOW }, "");
+check("锁超时释放也是 OK，status 必须是 null", expiredBody.status, null);
+check("锁超时释放要报告 releaseExpired=true", expiredBody.releaseExpired, true);
 /* stale 也落 failure：那是刻意的保守方向（见 lock.js 里 STATE 的注释）。 */
 check("stale 落 failure（保守方向）", statusBody(
   { hasLock: true, lock: findLock(comments(C)), pushedHead: B, previousHead: A, now: NOW }, ""
@@ -183,10 +197,12 @@ ok("statusBody 真的接了长度守卫", (() => {
   } catch { return true; }
 })());
 
-/* target_url 传了才带，没传就不带——空字符串会被 GitHub 拒。 */
+/* target_url 传了才带，没传就不带——空字符串会被 GitHub 拒。
+   **必须用 VOIDED/STALE 夹具**：OK 现在 status 是 null，没有字段可看——
+   用 OK 夹具测这条会拿 `null.target_url` 直接抛，测不出这条规则本身。 */
 ok("没传 target_url 时不带这个字段", !("target_url" in body.status));
 ok("传了 target_url 就带上",
-  statusBody({ hasLock: false, lock: null, pushedHead: B, previousHead: A, now: NOW },
+  statusBody({ hasLock: true, lock: findLock(comments(A)), pushedHead: B, previousHead: A, now: NOW },
     "https://example.invalid/x").status.target_url === "https://example.invalid/x");
 
 /* —— CLI：真的起一个进程跑 —— */
@@ -221,12 +237,20 @@ check("CLI 用的 context 是 review", JSON.parse(cli.stdout).context, "review")
 check("CLI 把 conclusion 写进 GITHUB_OUTPUT", /conclusion=voided/.test(cli.output), true);
 check("CLI 把 release_expired 写进 GITHUB_OUTPUT", /release_expired=false/.test(cli.output), true);
 
-/* 没有锁的那一次推送。 */
+/* 没有锁的那一次推送。**这就是 GTO-Trainer#186/#189/#191 那次事故的真实输入**
+   （`LOCK_PRESENT: "false"`）——曾经这里 CLI 吐出的是 `{"state":"success",...}`，
+   一个从没派过评审的 PR 因此拿到一条绿的 `review`。现在必须是空 stdout：
+   `body_path` 指向的文件没有内容可写，action.yml 据此把 has_body 判成 false，
+   工作流那一步就不会再去调 `gh api`。 */
 const cliNoLock = runCLI({
   LOCK_HEAD: B, LOCK_BEFORE: A, LOCK_PRESENT: "false",
   LOCK_COMMENTS: "[]", LOCK_NOW: String(NOW),
 });
-check("没有锁时 CLI 写 success", JSON.parse(cliNoLock.stdout).state, "success");
+check("没有锁时 CLI 正常退出（0，不是失败——这不是错误，是『没有评审在飞』）", cliNoLock.code, 0);
+check("没有锁（事故现场的真实输入）时 CLI 不吐任何检查体：stdout 必须是空串",
+  cliNoLock.stdout, "");
+check("没有锁时仍如实把 conclusion=ok 写进 GITHUB_OUTPUT（给 action.yml 之外的消费方用）",
+  /conclusion=ok/.test(cliNoLock.output), true);
 
 /* **`hasLock=false` 时即使评论里躺着一条锁评论也不认。**
    判定信的是事件快照里的标签（`LOCK_PRESENT`），不是评论——
@@ -235,14 +259,15 @@ const cliLabelGone = runCLI({
   LOCK_HEAD: B, LOCK_BEFORE: A, LOCK_PRESENT: "false",
   LOCK_COMMENTS: JSON.stringify(comments(A)), LOCK_NOW: String(NOW),
 });
-check("标签摘了之后旧评论不算数", JSON.parse(cliLabelGone.stdout).state, "success");
+check("标签摘了之后旧评论不算数，CLI 不吐检查体", cliLabelGone.stdout, "");
 
-/* 超时释放那一次。 */
+/* 超时释放那一次：也是 OK，也不该吐检查体，但仍要报 release_expired=true
+   让工作流那边留痕（那一步不依赖 has_body，摘标签+留评论走的是另一条件）。 */
 const cliExpired = runCLI({
   LOCK_HEAD: B, LOCK_BEFORE: A, LOCK_PRESENT: "true",
   LOCK_COMMENTS: JSON.stringify(comments(A, "alice", PAST)), LOCK_NOW: String(NOW),
 });
-check("超时那一次 CLI 也写 success", JSON.parse(cliExpired.stdout).state, "success");
+check("超时那一次 CLI 也不吐检查体（它是 OK，不是 VOIDED/STALE）", cliExpired.stdout, "");
 check("超时那一次要报告 release_expired", /release_expired=true/.test(cliExpired.output), true);
 
 /* 失败方向：全都要非零退出，而且**不许吐出检查体**——
@@ -267,7 +292,7 @@ for (const [name, env] of BAD) {
 const noBefore = runCLI({ LOCK_HEAD: B, LOCK_BEFORE: undefined, LOCK_PRESENT: "true",
                           LOCK_COMMENTS: JSON.stringify(comments(A)), LOCK_NOW: String(NOW) });
 check("before 缺失时不抛，正常判（新分支第一次推送）", noBefore.code, 0);
-check("before 缺失时读成空串、不判作废", JSON.parse(noBefore.stdout).state, "success");
+check("before 缺失时读成空串、不判作废，也不吐检查体（OK）", noBefore.stdout, "");
 
 /* ---- 接线本身要钉住 ----
    这一段守的不是判定逻辑，是**这套接线到底跑不跑得起来**。
@@ -350,6 +375,59 @@ check("before 缺失时读成空串、不判作废", JSON.parse(noBefore.stdout)
   ok("W12 **多行的 comments 必须用 heredoc 定界符写进 $GITHUB_OUTPUT**"
     + "（写 `comments=$BODY` 会因为值里有换行被 GitHub 拒掉）",
     /comments<<__LOCK_EOF__/.test(wf));
+
+  /* W13 / W14：这次要修的洞——OK 时无条件写一条 success 的 review，
+     把「缺席即拦」废掉了（GTO-Trainer#186/#189/#191）。
+     判定不许只活在 YAML 的 `if` 里，落点是「有没有 body」，见 action.yml / lock.js
+     的注释。这里钉住接线还在，不是重新验一遍那条 gh api 会不会因空 body 而失败——
+     那条要真的打一次网络请求才验得动，这个套件验不了，只能靠这两处（`.claude/rules/
+     ci-dev.md` 允许的退路是「说清楚它靠什么兜底」，见 PR 里的报告）。 */
+  ok("W13 正对照：组合动作里确实有 has_body 这个输出（下面判据不是凭空的）",
+    /has_body/.test(act));
+  ok("W13 has_body 必须照 body 文件是不是非空算（`[ -s ... ]`），"
+    + "不是重新问一遍 conclusion——判据落在产出的文件上，即使调用方少判它也有兜底",
+    /\[ -s "\$RUNNER_TEMP\/review-lock\.json" \]/.test(act));
+  ok("W13 outputs 块里也声明了 has_body（不只是 step 里写，还要透传给调用方）",
+    /has_body:/.test(act) && /steps\.decide\.outputs\.has_body/.test(act));
+
+  ok("W14 正对照：workflow 里确实有『在新 head 上写 review commit status』这一步"
+    + "（下面判据不是凭空的）",
+    /在新 head 上写 review commit status/.test(wf));
+  /* **只看这一步自己的 `if:` 那一行代码，不看整份文件、也不看注释**：
+     上面那段说明性注释里为了讲清楚这条规矩，字面上就含 `has_body == 'true'`——
+     如果只 `wf.includes(...)` 全文匹配，把这一步真正的 `if:` 删掉、只留注释，
+     断言照样绿。**这正是本仓 code-reviewer 记录过的坑（W11 那条注释同一形状）**：
+     一次无命中/命中同时兼容两种解释，这里补的是「命中」也可能命中错地方。
+     所以先剥注释（`wfCode`，W11 已经算过），再定位这一步之后紧跟着的
+     `if:` 那一行本身。 */
+  const writeStatusIf = (() => {
+    const idx = wfCode.indexOf("在新 head 上写 review commit status");
+    if (idx === -1) return "";
+    const after = wfCode.slice(idx, idx + 300);
+    const m = /if:\s*(.*)/.exec(after);
+    return m ? m[1] : "";
+  })();
+  ok("W14 正对照：定位到了这一步自己的 if 行（下面判据不是凭空的）",
+    writeStatusIf.length > 0);
+  ok("W14 那一行 `if:` 本身（不是附近的注释）必须带 `has_body == 'true'`——"
+    + "OK 时不许尝试写检查（这条是效率与噪音的问题，不是安全边界；"
+    + "安全边界是空 body 让 gh api 自己失败，见 W13 与 lock.js 里 statusBody 的注释）",
+    /has_body == 'true'/.test(writeStatusIf));
+
+  /* W15：lock.js 里 `statusBody` 对 OK 结论必须提前返回 `status: null`，
+     不能落进给 STATE 表查值那条路——STATE 表里已经没有 OK 这个键了，
+     如果早退分支被删掉，`STATE[OK]` 会是 `undefined`，函数会抛，
+     而不是「安静地」写回 success。这条断言钉的是源码形状，行为已经被
+     上面那些 statusBody() 的单测钉过了，这里只是防止两处各自漂移。 */
+  const lockSrc = fs.readFileSync(path.join(__dirname, "lock.js"), "utf8");
+  /* **只看真正的 STATE 定义那一行，不看它上面一整段解释这次事故的注释**——
+     那段注释里为了说清楚「以前这里写的是什么」，字面上就含
+     `[OK]: "success"`，拿它去扫整个文件会被自己的说明文字触发（同 W11 的坑）。 */
+  const stateLine = (lockSrc.match(/^const STATE = \{.*\}\s*;/m) || [""])[0];
+  ok("W15 正对照：确实取到了 STATE 定义那一行（下面判据不是凭空的）",
+    stateLine.length > 0);
+  ok("W15 STATE 表里不许再出现 `[OK]:`（OK 早就该在更前面被拦下，不该有对应的 state 值）",
+    stateLine.length > 0 && !/\[OK\]/.test(stateLine));
 }
 
 console.log(`\nPR 写锁判定：${pass} 通过 / ${fail} 失败`);
