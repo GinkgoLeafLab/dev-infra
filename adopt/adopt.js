@@ -194,7 +194,7 @@ function renderShim(tpl) {
 /* caller 的体检。**查的全是「漏了不报错、只是那条路安静地不存在」的东西**：
    少一个事件、少半个 if、少一个权限、钉到会动的名字。查不出本仓自己加的东西，
    那不是这儿的事。 */
-function lintCaller(kind, text) {
+function lintCaller(kind, text, { qa } = {}) {
   const bad = [];
   /* **先把整行注释剥掉再判**：这些模板的注释里逐字写着 `review-passed`、`synchronize`、
      `@main` 这些词（它们正是在解释那几条），照着原文判会把「注释里提过」当成
@@ -228,6 +228,20 @@ function lintCaller(kind, text) {
     if (!has(/issues:\s*write/)) bad.push("少了 issues: write（标签归在 issues 这个 scope 下）");
     if (has(/statuses:\s*write/)) bad.push("抄了隔壁的 statuses: write，这条流水线不需要");
     if (!has(/qa-labels:\s*(true|false)/)) bad.push("没有 qa-labels 这个输入");
+    /* **这一条曾经住在 run.js 里，判的是文件原文**——于是它正好绕开了上面剥注释那一步：
+       装了 qa-gate、`qa-labels: false`、而任何一行注释里出现 `qa-labels: true`，体检就报绿
+       （实跑过）。那正是这个脚本自己定义的最严重错法：「报告说装好了，其实没装」。
+       所以它搬进来了，和同源的那条（有没有 qa-labels 这一行）在同一处、共用同一份 code。
+       **`qa` 不给就抛，不是跳过**：漏掉这条一致性判定的表现就是上面那句报绿，
+       而「静默少一条判定」在这个脚本里是最不能容忍的失效方向。 */
+    if (qa === undefined) {
+      throw new Error("lintCaller('labels-sync') 必须告诉它本仓装没装 qa-gate（{ qa: true|false }）");
+    }
+    if (has(/qa-labels:\s*true/) !== !!qa) {
+      bad.push(qa
+        ? "装了 qa-gate 却没传 qa-labels: true：qa-required / qa-passed 这两个标签在本仓根本不存在，而 GitHub 对打一个不存在的标签是**静默不打**"
+        : "传了 qa-labels: true 但本仓没有 qa-gate：等于建两个没有任何东西在读的标签");
+    }
   }
   if (kind !== "labels-sync" && has(/contents:\s*read/)) {
     bad.push("有 contents: read：这条路上一次 checkout 都不做，给了它说明接线理解错了");

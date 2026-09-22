@@ -288,13 +288,10 @@ module.exports = function run(A) {
       say(DID, kind, `写了 ${file}，钉 ${infraTag}`);
       continue;
     }
-    const { problems, refs } = A.lintCaller(kind, got);
-    const qaMismatch = kind === "labels-sync" && /qa-labels:\s*true/.test(got) !== !!wantQa;
-    if (qaMismatch) {
-      problems.push(wantQa
-        ? "装了 qa-gate 却没传 qa-labels: true：qa-required / qa-passed 这两个标签在本仓根本不存在，而 GitHub 对打一个不存在的标签是**静默不打**"
-        : "传了 qa-labels: true 但本仓没有 qa-gate：等于建两个没有任何东西在读的标签");
-    }
+    /* qa-labels 和「本仓到底装没装 qa-gate」一致不一致，由 lintCaller 判——
+       **别在这儿自己判一遍**：这条判定曾经写在这里、拿文件原文 `got` 去 test，
+       于是绕开了 lintCaller 里剥注释那一步，一行注释就能把它翻过来（实跑过）。 */
+    const { problems, refs } = A.lintCaller(kind, got, { qa: wantQa });
     if (!problems.length) say(OK, kind, `${file}，钉 ${refs.join(" / ")}`);
     else say(BAD, kind, `${file}：\n      - ` + problems.join("\n      - "));
   }

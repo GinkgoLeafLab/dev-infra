@@ -74,13 +74,13 @@ check("isImmutableTag 不认 v1", A.isImmutableTag("v1"), false);
 /* —— caller 体检：先在自家模板上必须全绿 —— */
 for (const kind of ["review-gate", "qa-gate", "labels-sync"]) {
   const text = A.renderCaller(TPL(kind), { tag: "v1.14.0", qa: true });
-  const { problems } = A.lintCaller(kind, text);
+  const { problems } = A.lintCaller(kind, text, { qa: true });
   check(`${kind} 模板自己过体检`, problems.join(" | "), "");
 }
 
 /* —— 然后每一条都要真的判得出来（变异） —— */
-function lint(kind, mutate, tag = "v1.14.0") {
-  return A.lintCaller(kind, mutate(A.renderCaller(TPL(kind), { tag, qa: true }))).problems.join(" | ");
+function lint(kind, mutate, tag = "v1.14.0", qa = true) {
+  return A.lintCaller(kind, mutate(A.renderCaller(TPL(kind), { tag, qa })), { qa }).problems.join(" | ");
 }
 check("types 里少了 synchronize 判得出来",
   /synchronize/.test(lint("review-gate", (t) => t.replace("types: [labeled, synchronize]", "types: [labeled]"))), true);
@@ -103,15 +103,41 @@ check("labels-sync 抄了隔壁的 statuses 判得出来",
 check("labels-sync 少了 issues: write 判得出来",
   /issues: write/.test(lint("labels-sync", (t) => t.replace(/^(\s+)issues: write$/m, "$1pull-requests: write"))), true);
 
-/* **这一条是整份体检的地基**：模板的注释里逐字写着 synchronize / review-passed，
-   照着原文判的话，把接线整段删掉也照样「全绿」。剥注释那一步一旦丢了，这条当场红。 */
-check("接线只剩注释里提过时仍然判得出来", (() => {
-  const t = A.renderCaller(TPL("review-gate"), { tag: "v1.14.0", qa: false })
-    .replace("types: [labeled, synchronize]", "types: [labeled]")
-    .replace(/if: github\.event\.label\.name.*\n/, "");
-  const p = A.lintCaller("review-gate", t).problems.join(" | ");
-  return /synchronize/.test(p) && /review-passed/.test(p);
-})(), true);
+/* —— 剥注释那一步的正对照：**两个方向各一条** ——
+   这儿上一版是一条选错了路径的变异（「把接线删掉、只留注释里提过，看它还报不报」），
+   评审实打出来它在剥与不剥两种实现下**都是绿的**：不剥注释的失效方式不是少报、
+   是**多报**——`synchronize` / `review-passed` 在注释里也出现，所以「这两条在不在
+   problems 里」根本区分不出两种实现。而那条断言上面当时还写着「一旦丢了当场红」。
+   **失效的守卫 + 一句声称它有用的注释**是最糟的组合：下一个人会读着那句话，
+   以为剥注释这一步有专门的守卫钉着。所以换成真正会出事的那两条路径。 */
+
+/* 方向一（误报）：接线完全正确，注释里逐字写着 contents: read → 必须绿。
+   注释是这儿自己加的，不依赖模板里恰好有那么一句——那样这条断言会随模板措辞变绿变红。 */
+check("注释里提到 contents: read 不算接线上有",
+  lint("review-gate", (t) => t.replace(/^permissions: \{\}$/m, "# 这条路上一次 checkout 都不做，所以没有 contents: read\npermissions: {}")), "");
+
+/* 方向二（漏报）：接线真的坏了，而注释里带着那个字面量 → 必须红。 */
+check("接线坏了而注释里带着字面量时照样判得出来",
+  /synchronize 那一半/.test(lint("review-gate", (t) => t.replace(/^(\s+)if: github\.event\.label\.name.*$/m,
+    "$1# 这一行必须带 github.event.action == 'synchronize' 那一半，否则写锁永远不跑\n$1if: github.event.label.name == 'review-passed'"))), true);
+
+/* qa-labels 那条一致性判定的正对照，同样两个方向。
+   它曾经住在 run.js 里拿文件原文判，于是**一行注释就能把结论翻过来**：
+   装了 qa-gate、文件写的是 false、注释里出现 true → 体检报绿，也就是
+   「报告说装好了，其实没装」，而实际后果是那两个标签在那个仓里根本不存在。 */
+check("qa-labels 只在注释里为 true 时，不算本仓传了 true",
+  /装了 qa-gate 却没传/.test(A.lintCaller("labels-sync",
+    A.renderCaller(TPL("labels-sync"), { tag: "v1.14.0", qa: false })
+      .replace(/^(\s+)qa-labels: false$/m, "$1# 升级时记得把 qa-labels: true 打开\n$1qa-labels: false"),
+    { qa: true }).problems.join(" | ")), true);
+check("同一份文件在没装 qa-gate 的仓里是对的，不许因为那行注释报错",
+  A.lintCaller("labels-sync",
+    A.renderCaller(TPL("labels-sync"), { tag: "v1.14.0", qa: false })
+      .replace(/^(\s+)qa-labels: false$/m, "$1# 升级时记得把 qa-labels: true 打开\n$1qa-labels: false"),
+    { qa: false }).problems.join(" | "), "");
+
+/* 不告诉它本仓装没装 qa-gate 就抛：**静默少一条判定**正是上面那个洞的形状。 */
+throws("labels-sync 不给 qa 就抛", () => A.lintCaller("labels-sync", A.renderCaller(TPL("labels-sync"), { tag: "v1.14.0", qa: true })), /必须告诉它/);
 
 /* —— 守卫入口该叫什么名字 ——
    **这条是端到端那一节抓出来的真实 bug**：守卫入口住在消费仓里，所以 node 按消费仓
