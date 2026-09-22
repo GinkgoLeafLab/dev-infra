@@ -67,10 +67,13 @@ const { spawnSync } = require("child_process");
 function isDocFile(f) {
   if (typeof f !== "string" || f === "") return false;
   if (f.startsWith("docs/")) return true;
-  /* 路径段匹配，不是「开头是不是 .claude/」：Claude Code 认子目录里的 .claude/
-     （目录级 skill / 规则），`sub/.claude/x.md` 一样是配置，不该被判成文档。
+  /* 路径段匹配，不是「开头是不是 .claude/」。理由不在「Claude Code 会不会加载
+     子目录里那一份」上——**本仓 README 写着 `.claude/skills/` 只在项目根那一层被扫**，
+     别在这儿留一句和它对着来的话。理由是判定这一侧的：`sub/` 底下同样可能是
+     另一个项目根（monorepo、嵌套的克隆）的配置目录，那儿的 .md 一样是配置不是文档，
+     而判成非文档是安全的那一侧——最多多跑一遍测试。
      反过来 `src/my.claude.md`、`.claudeignore.md` 只是文件名里带这几个字符，
-     不是这个目录，不该被误伤。 */
+     不构成这个目录段，不该被误伤。 */
   if (f.endsWith(".md")) return !/(^|\/)\.claude\//.test(f);
   return false;
 }
