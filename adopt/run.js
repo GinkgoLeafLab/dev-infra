@@ -43,6 +43,32 @@ module.exports = function run(A) {
 
   console.log(`仓库：${root}（分支 ${branch || "？"}）${o.check ? "  — 只体检，不写东西" : ""}`);
 
+  /* 目标仓库是 dev-infra 自己的话，到此为止——**两种模式都停**。
+     这不是洁癖：在这个仓库里那三个 caller 名字被可复用工作流本体占着，
+     `--check` 会拿 caller 的形状去判本体、报一屏和事实相反的 ❌（本体当然不是
+     `pull_request_target`，它是 `workflow_call`），而按那份报告去「修」正是把本体
+     覆盖掉。写入模式更直接：会挂一个指回自己的子模块。
+     本仓自己那一侧接的是同一套东西、形状不一样，由本仓的 self-adopt.test.js 钉着。
+     **退出码是 1**：这个脚本的规矩是判不了算 ❌，给 0 会让人以为验过了。 */
+  if (A.detectSelfHost({
+    reviewGateYml: readIf(".github/workflows/review-gate.yml"),
+    hasSharedGuard: exists("shared/guard-branch.js"),
+    hasAdoptScript: exists("adopt/adopt.js"),
+  })) {
+    console.error(`${BAD} 这个仓库就是 dev-infra 本身：.github/workflows/review-gate.yml 是
+   **可复用工作流本体**，不是 caller。这个脚本是按「那三个名字是 caller」写的，
+   在这儿判出来的每一条都是反的，写入模式还会挂一个指回自己的子模块。
+
+   本仓自己那一侧接的是同一套东西，形状不一样（caller 叫 self-*.yml，守卫入口指树里的
+   shared/，没有子模块），由本仓自己的测试钉着：
+
+     node self-adopt.test.js
+
+   形状与逐条理由见 README「这个仓库自己也接着这套东西」。
+   要体检一个**消费仓**，用 --repo 指过去。`);
+    process.exit(1);
+  }
+
   if (!o.check) {
     /* 受保护分支上不许跑：这个脚本会让 subtree 造提交，而那正是分支守卫拦的事。
        **`--check` 不受这条限制**，它一个字节都不写。 */

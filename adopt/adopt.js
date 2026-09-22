@@ -56,6 +56,13 @@ const SETTINGS_FILE = ".claude/settings.json";
 const SKILL_STUB = ".claude/skills/dev-infra/SKILL.md";
 
 const GUARD_REL = ["..", "vendor", "dev-infra", "shared", "guard-branch.js"];
+/* dev-infra 自己那一侧的守卫入口指的是**树里**的 shared/，不是一个指回自己的子模块
+   （理由见本仓 README「这个仓库自己也接着这套东西」）。放在这儿而不是那边，
+   是因为它和上面那条必须成对读：两条都是「guard-hook.js 里那行 GUARD 该指哪儿」，
+   分在两个文件里改一条忘一条不会有任何报错——渲染出来的入口照样能跑，
+   只是指到一个不存在的路径上，而那等于守卫静默放行。self-adopt.test.js 钉着本仓那份
+   逐字节等于 renderShim(模板, SELF_GUARD_REL)。 */
+const SELF_GUARD_REL = ["..", "shared", "guard-branch.js"];
 const SETUP_HOOKS = SUBMODULE_PATH + "/shared/setup-hooks.js";
 const GUARD_TEST = SUBMODULE_PATH + "/shared/guard-branch.test.js";
 const PREPARE = "git submodule update --init --recursive && node " + SETUP_HOOKS;
@@ -165,6 +172,24 @@ function shimPathFor(pkg) {
   return pkg && pkg.type === "module" ? SHIM_PATH_CJS : SHIM_PATH;
 }
 
+/* 目标仓库就是 dev-infra 本身吗？
+
+   **这条判定拦的是一次真的会毁东西的误用**：在这个仓库里 `.github/workflows/review-gate.yml`
+   等三个名字被**可复用工作流本体**占着，而脚本是按「那三个名字是 caller」写的——
+   在这儿跑写入模式，轻则挂一个指回自己的子模块，重则拿 caller 的形状去判本体，
+   报一屏和事实相反的 ❌（实跑过：本体会被判成「不是 pull_request_target」「少了 labeled」）。
+   本仓自己那一侧的接线形状不一样，由本仓的 self-adopt.test.js 钉着，不归这个脚本判。
+
+   **判据是内容，不是 remote 的 url**：镜像、fork、改过名字的克隆都还是这个仓库，
+   而 url 判据在那几种情况下会悄悄判成「普通消费仓」——判错的方向正好是去动本体。
+   三条同时成立才算，一个真的消费仓永远不会同时有这三样：
+   本体在（review-gate.yml 里是 `workflow_call`，不是 caller 的 `pull_request_target`）、
+   第二层源文件在（shared/guard-branch.js）、接入脚本自己在（adopt/adopt.js）。 */
+function detectSelfHost({ reviewGateYml, hasSharedGuard, hasAdoptScript }) {
+  if (!hasSharedGuard || !hasAdoptScript) return false;
+  return /^\s*workflow_call:/m.test(String(reviewGateYml || ""));
+}
+
 /* 渲染出来的 caller 必须是钉死的。这个断言是「永远不会写出 @main」的那道保险：
    模板改坏、替换没命中，都在这儿当场炸，而不是等某个仓库合了才发现。 */
 function assertPinned(text, where) {
@@ -184,8 +209,10 @@ function renderCaller(tpl, { tag, qa }) {
   return out;
 }
 
-function renderShim(tpl) {
-  const rel = GUARD_REL.map((s) => JSON.stringify(s)).join(", ");
+/* `parts` 是给 dev-infra 自己那一侧留的口子（它不挂指回自己的子模块，见 SELF_GUARD_REL）。
+   默认值是消费仓那条路径，所以调用方少传一个参数拿到的仍然是原来那一份。 */
+function renderShim(tpl, parts = GUARD_REL) {
+  const rel = parts.map((s) => JSON.stringify(s)).join(", ");
   const out = tpl.replace(/__GUARD_REL__/g, rel);
   if (out.includes("__GUARD_REL__") || !out.includes(rel)) throw new Error("guard-hook 模板渲染没命中");
   return out;
@@ -342,8 +369,9 @@ function mergePackageJson(pkg) {
 module.exports = {
   parseArgs, parseLsRemote, pickTag, cmpTag, isImmutableTag, assertPinned,
   renderCaller, renderShim, lintCaller, mergeSettings, mergePackageJson, shimPathFor,
+  detectSelfHost,
   SUBMODULE_PATH, SHIM_PATH, SHIM_PATH_CJS, AGENTS_PREFIX, VERSION_FILE, SETTINGS_FILE,
-  SKILL_STUB, PREPARE, REVIEW_GATE_MIN, PROTECTED, USAGE,
+  SKILL_STUB, PREPARE, REVIEW_GATE_MIN, PROTECTED, USAGE, GUARD_REL, SELF_GUARD_REL,
 };
 
 if (require.main === module) require("./run.js")(module.exports);

@@ -1,0 +1,11 @@
+{
+  "name": "dev-infra",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "setup:hooks": "node shared/setup-hooks.js",
+    "prepare": "node shared/setup-hooks.js",
+    "test:guard": "node shared/guard-branch.test.js",
+    "test:self-adopt": "node self-adopt.test.js"
+  }
+}

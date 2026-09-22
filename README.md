@@ -15,6 +15,8 @@
 | `shared/` | **第二层的源文件**：必须躺在各仓里才会被读到的那几份脚本与它们的测试 | 各仓把这个仓库整个当 **git submodule** 挂在 `vendor/dev-infra`，**不再各自落一份本地副本**。`core.hooksPath` 直接指进 `vendor/dev-infra/shared/githooks`；**PreToolUse hook 不直接指进子模块**，它走各仓自己那份 tracked 的 `scripts/guard-hook.js` 转接——子模块可以是空的，而空的时候 `node <缺失路径>` 是「非零退出、stdout 一个字节都没有」，PreToolUse 把它当 non-blocking error、**命令照常执行**（= 守卫静默放行） |
 | `adopt/` | **把一个仓库接上这套东西的脚本 + 那份 Skill**：写三份 caller、挂子模块、下发守卫入口、接 agent 定义的 subtree，以及事后 `--check` 体检同一套接线 | 接入时跑一次；之后每次升级 / 排查再跑 `--check` |
 | `.github/workflows/test.yml` | 本仓自己的测试，连同 `shared/` 里那份套件 | 不适用 |
+| `.github/workflows/self-review-gate.yml` / `self-labels-sync.yml`、`scripts/guard-hook.js`、`.claude/`、`package.json` | **这个仓库自己作为消费者的那一侧**（形状和别的仓不一样，见下面那一节） | 不适用 |
+| `self-adopt.test.js` | 钉住上面那一侧的接线——`adopt.js --check` 在这个仓库里判不了，会拒绝跑 | 不适用 |
 | `submodule-shape.test.js` + `.gitattributes` | 钉住「各仓把这里当 submodule 挂上会拿到什么」 | 不适用 |
 
 取舍见 `GinkgoLeafLab/GTO-Trainer` 的 `docs/方案/2026-09-跨仓库基础设施复用.md`。
@@ -458,6 +460,50 @@ package.json** 决定模块系统，往上找到的第一份会是消费仓自�
 指向 `vendor/dev-infra/adopt/SKILL.md`（**刻意不抄正文**：抄一份就会漂，而漂了不报错）。
 第一次接入时子模块还不存在，那时直接把临时克隆里的 `adopt/SKILL.md` 读给 agent 就行；
 想让它在每个仓库都常驻，把那份拷进 `~/.claude/skills/dev-infra/SKILL.md`。
+
+## 这个仓库自己也接着这套东西（形状不一样，原因只有一条）
+
+这个仓库也是消费者：它的 PR 也走 `review` 门禁，它的克隆也要有分支守卫，
+它也用 dev-agents 那几份角色定义。**但它这一侧的形状和别的仓不一样**，
+原因只有一条——在这儿 `.github/workflows/review-gate.yml` 这几个名字被
+**可复用工作流本体**占着，别的仓那份 caller 正好叫同一个名字。
+
+| 接什么 | 别的仓 | 这个仓库 | 为什么 |
+|---|---|---|---|
+| review-gate caller | `.github/workflows/review-gate.yml` | `.github/workflows/self-review-gate.yml` | 同名会把**本体**盖掉 |
+| labels-sync caller | `.github/workflows/labels-sync.yml` | `.github/workflows/self-labels-sync.yml` | 同上。**它里面那条 `paths:` 也跟着改成了自己的路径**——文件名和那条 `paths:` 是同一处真相的两半，只改一半的表现是「升了版本号、这条流水线根本没触发」，绿的、Actions 里连一条失败记录都没有 |
+| qa-gate caller | 装了 QA 门禁的仓才有 | **没装** | 本仓的改动由 `test.yml` 那一排自动测试覆盖，没有「要人手点一遍」的东西。所以 `qa-labels` 也必须是 `false`：给 `true` 等于建两个没有任何东西在读的标签 |
+| 第二层的判定逻辑 | submodule `vendor/dev-infra` | **树里的 `shared/`**，不挂子模块 | 挂一个指回自己的子模块，本仓的钩子跑的就是**钉在某个旧 tag 上的那一版守卫**，而不是工作区里正在改的这一版——守卫改坏了本仓自己反而感觉不到，那正是这套东西要消灭的静默失效 |
+| 守卫入口 | `scripts/guard-hook.js` 指进子模块 | 同一份模板，那行 `GUARD` 指 `../shared/guard-branch.js` | 逐字节等于 `renderShim(模板, SELF_GUARD_REL)`，由 `self-adopt.test.js` 钉着。**别手改它**，改模板再重新生成 |
+| `prepare` | `git submodule update --init --recursive && node vendor/…/setup-hooks.js` | `node shared/setup-hooks.js` | 没有子模块要 init |
+| agent 定义 | `.claude/agents/common` 走 subtree | **一样**，这一层没有差别 | |
+
+**`adopt/adopt.js` 在这个仓库里会当场拒绝跑（两种模式都拒绝，退出码 1）。**
+它是按「那三个名字是 caller」写的，在这儿判出来的每一条都是反的
+（本体当然不是 `pull_request_target`，它是 `workflow_call`），而照着那份报告去「修」，
+改的就是各仓共用的那一份逻辑。判据是内容不是 remote 的 url：镜像、fork、改过名字的
+克隆都还是这个仓库，url 判据在那几种情况下会往**漏判**的方向错，而漏判正是去动本体。
+
+**所以本仓这一侧的接线由 `self-adopt.test.js` 钉着**（`test.yml` 里一步，PR 上就跑）：
+caller 的形状复用 `lintCaller`、守卫入口复用 `renderShim`、PreToolUse 复用 `mergeSettings`
+——判定逻辑一条都不在那份测试里自己写，它只负责说「本仓这一侧应该长什么样」。
+它还会跟 dev-agents 那个 tag 逐字节比一遍 `.claude/agents/common`；**这一条要联网，
+联不上是失败不是跳过**（真的没网就显式给 `SELF_ADOPT_OFFLINE=1`，它会出声地说这条没验过）。
+
+**一处已知的粗糙，写下来而不是让它静默**：守卫入口那份模板里「判定逻辑不在盘上」时
+打印的文案是按子模块布局写的（让你 `npm install` / `git submodule update`）。
+在这个仓库里判定逻辑是**树里一个 tracked 文件**，那几条命令补不回它——真撞上
+（有人删了 `shared/guard-branch.js`）要 `git checkout -- shared/guard-branch.js`。
+文案不为一个仓库分叉：那会让各仓的守卫入口开始各不相同，而那比一段用不上的文案贵得多。
+这一支是 fail-closed 的（拦住并说话），所以代价只是文案指错路，不是放行。
+
+**升级和别的仓一样**：改 `self-*.yml` 里那行 `uses:` 的版本号，走 PR。
+**自引用也按 tag 钉，不按分支**——它的意思是「这个 PR 里对 `review-gate.yml` 的改动，
+不会用来评审这个 PR 自己」，和别的仓的性质完全一样：改了本体、忘了升这一行，不是 bug。
+
+**第三层（仓库设置）在这个仓库同样是人去点的**：默认分支 ruleset 禁止直推、
+必需检查里钉 `review`（**被调用方用 API 写出来的那个名字**，不是 `review-gate / gate`
+那种 job 名）和本仓的 `test`。没钉之前那几道门只是「看得见」，不是「拦得住」。
 
 ## 这里放什么、不放什么
 

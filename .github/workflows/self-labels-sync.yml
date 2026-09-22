@@ -1,0 +1,75 @@
+name: labels-sync
+
+# 把共享的标签清单同步成这个仓库的 GitHub 标签。
+#
+# **清单和逻辑都不在这儿**：可复用工作流在 GinkgoLeafLab/dev-infra 的
+# .github/workflows/labels-sync.yml，同步脚本**和两份清单**（labels.json /
+# labels.qa.json）跟着那边的组合动作一起下发到 runner，各仓库共用同一份。
+# 这份文件是 dev-infra 的 adopt 脚本按模板生成的。
+#
+# 为什么需要它：流程里有一批标签是**机制的组成部分**（issue 分级的
+# bug / enhancement / chore + sev/ + status/，以及放行锁用的 review-passed、
+# review/in-flight，装了 qa-gate 的仓还有 qa-required / qa-passed）。
+# GitHub 对「打一个不存在的标签」的处理是**静默不打**，所以名字差一个字符，
+# agent 那一步就悄悄失败。
+#
+# **它只加和改，永远不删也不改名。** 删标签会把它从所有 issue 上摘掉，不可逆；
+# 清单里没有的标签只报告。理由写在 dev-infra 那份脚本顶部。
+#
+# **为什么这里可以用 paths，而 test.yml / qa-gate.yml 不行**：那条禁令的理由是
+# 那两个是**必需检查**，workflow 级过滤会让检查停在 "Expected — waiting for status"，
+# PR 就永远合不了。这条流水线**永远不会是必需检查**（它是一个动作，不是一个判断），
+# 也不在 PR 上跑，所以那个失效模式在这里不存在。**别拿这一条去给别的流水线加 paths。**
+
+# ---------------------------------------------------------------------------
+# **这份文件是本仓自己作为消费者的那一侧，文件名和别的仓不一样，这是刻意的**
+# ---------------------------------------------------------------------------
+#
+# 别的仓这份 caller 叫 .github/workflows/labels-sync.yml；这个仓库里那个名字被
+# **可复用工作流本体**占着（下面 uses: 指过来的那一份）。所以本仓的 caller 一律加
+# self- 前缀，**下面 paths: 那一行也跟着改成了本文件自己的路径**——它和文件名是
+# 同一处真相的两半，只改一半的表现是「升了版本号、这条流水线不跑」，而且是绿的、
+# 没有任何症状（推送根本没触发它，Actions 里连一条失败记录都没有）。
+# self-adopt.test.js 钉着这两半必须对得上。
+
+on:
+  # 清单不在这个仓里，所以这个仓的日常 push 不改变该同步什么。
+  # **真正会改变结果的只有一件事：下面那一行 `uses:` 的版本号变了。**
+  # 清单跟着组合动作在那个 tag 上下发，而 dev-infra 的 tag 不移动——
+  # 那边改了清单，也要等这一行升上去才传得过来。
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/self-labels-sync.yml'
+  # 手动触发**不是**「追上新清单」的手段（它跑的仍然是当前钉着的那个 tag 里那一份，
+  # 而且那条路是绿的、没有任何症状）。它的用途是另一件事：
+  # 有人在网页上手改了标签，跑一次按当前这份清单对回来。
+  workflow_dispatch:
+
+permissions: {}
+
+# 两次推送挤在一起时让后一次赢。标签同步是幂等的，跑旧的那一版没意义。
+concurrency:
+  group: labels-sync
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    # 权限必须在这儿要：官方明写权限取自 calling job，被调用方**只能降不能升**。
+    # 只要 issues: write（标签归在 issues 这个 scope 下），**不是** statuses /
+    # pull-requests——照着这一份抄，别抄隔壁那两份。
+    # 用 Actions 自带的 GITHUB_TOKEN，**不需要 PAT**：只同步本仓库。
+    #
+    # **这里没有 `contents: read`，也不该有**：脚本与清单都跟着组合动作下发。
+    permissions:
+      issues: write
+    # 按不可变 tag 钉，不按分支。升级 = 改这一行的版本号，而改这一行要在本仓被评审。
+    #
+    # **清单进了仓库 ≠ 标签已经在 GitHub 上建出来了**：升上去之后这条流水线真的跑过
+    # 一次，新标签才存在。好消息是**合并这个 PR 就会跑一次**（上面 push 那条 paths
+    # 正好命中本文件）。
+    uses: GinkgoLeafLab/dev-infra/.github/workflows/labels-sync.yml@v1.15.0
+    with:
+      # **只有真的装了 qa-gate 的仓才给 true。** 给了 true 却没有 qa-gate，
+      # 等于在这个仓里建两个没有任何东西在读的标签、还给了它们一份正式定义。
+      qa-labels: false
