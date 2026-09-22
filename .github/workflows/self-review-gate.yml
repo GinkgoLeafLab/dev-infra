@@ -1,0 +1,89 @@
+name: review-gate
+
+# 把 code-reviewer 的「通过」结论变成一个挂在 PR head SHA 上的必需检查 `review`。
+#
+# **逻辑不在这儿**，在 GinkgoLeafLab/dev-infra 的 .github/workflows/review-gate.yml，
+# 各仓库共用同一份。这里只留**必须留在 caller 的那几样**，理由逐条写在下面。
+# 这份文件是 dev-infra 的 adopt 脚本按模板生成的；改它要想清楚下面每一条注释。
+#
+# 这个 workflow 自己会产生一个 "review-gate / …" 形状的检查——**那不是必需检查**，
+# ruleset 里要钉的是被调用方用 API 写出来的那个 `review`，别钉错。
+
+# ---------------------------------------------------------------------------
+# **这份文件是本仓自己作为消费者的那一侧，文件名和别的仓不一样，这是刻意的**
+# ---------------------------------------------------------------------------
+#
+# 别的仓这份 caller 叫 .github/workflows/review-gate.yml；在这个仓库里那个名字
+# 被**可复用工作流本体**占着（就是下面 uses: 指过来的那一份）。同名会把本体覆盖掉，
+# 所以本仓的 caller 一律加 self- 前缀。adopt 脚本因此在这个仓库里拒绝写文件，
+# 本仓这一侧的接线改由 self-adopt.test.js 钉着（README「这个仓库自己也接着这套东西」）。
+#
+# **自引用也按 tag 钉，不按当前分支**：钉 @v1.15.0 的意思是「这个 PR 里对
+# review-gate.yml 的改动，不会用来评审这个 PR 自己」——本仓的改动和别的仓一样，
+# 要等打了新 tag、再改这一行才生效。改了本体忘了升这一行不是 bug，是这条性质。
+
+on:
+  # 用 pull_request_target 而不是 pull_request，是这个 workflow 的**安全地基**：
+  # 它的定义取自默认分支（官方文档 pull_request_target 一节原话："runs in the context
+  # of the default branch of the base repository… This prevents execution of unsafe
+  # code from the head of the pull request"）。换成 pull_request 的话，在特性分支上
+  # 把本文件改成无条件放行，推上去就生效了。
+  #
+  # **搬去 dev-infra 也不行**：可复用工作流没有自己的触发器，事件永远来自 caller。
+  #
+  # **它堵住的只是「改本文件」。** 一个 PR 仍然可以**新增**一个 on: pull_request 的
+  # workflow，自己给自己写同名的 review 检查——必需检查是按名字匹配的。那条路只能靠评审拦。
+  #
+  # 这里全程不 checkout、不跑 PR 里的任何代码，所以 pull_request_target 常见的
+  # 那个「拿着仓库 secret 跑外来代码」的风险在这条路上不存在。
+  #
+  # **两个事件，两条完全不同的路**（都定义在 dev-infra 那份里）：
+  #
+  # | 事件 | 做什么 |
+  # |---|---|
+  # | `labeled` + `review-passed` | 在 head SHA 上写 `review` = success（评审通过） |
+  # | `synchronize`（推了新 commit） | 读 PR 写锁，判这次推送有没有让在飞的评审结论作废 |
+  #
+  # **`synchronize` 一条都不能少**：漏了它，PR 写锁那条路永远不会跑——而这正是
+  # 「作者在评审跑的时候推了新 commit、这一轮结论作废」要防的东西
+  # （在 GinkgoLeafLab/GTO-Trainer#182 上实测过：一份纯文档走了 9 轮评审，
+  # 其中两轮已判「通过」后作废）。少了它不会有任何报错，只是那把锁安静地不存在。
+  pull_request_target:
+    types: [labeled, synchronize]
+
+permissions: {}
+
+concurrency:
+  group: review-gate-${{ github.event.pull_request.number }}
+  # 跑到一半被砍会留下「标签摘了但检查没写」的状态，不取消。
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    # **账单前提，不是过滤器**：写在 job 级的 if 上，别的事件连 runner 都不会起、
+    # 不计分钟数。搬进 dev-infra 那份就变成「起了 runner 再判断」——功能完全正常，
+    # 只有账单变了，而且没有任何症状。
+    #
+    # 两半都要，缺一不可：
+    #   - `review-passed` 那一半是标签路（标签事件只认这一个标签）
+    #   - `synchronize` 那一半是 PR 写锁要的。**它不是标签事件**，
+    #     所以 `github.event.label.name` 是 null，只看前半句的话它会被整个挡掉。
+    if: github.event.label.name == 'review-passed' || github.event.action == 'synchronize'
+    # 权限必须在这儿要：官方原文 "If `jobs.<job_id>.permissions` is not specified
+    # in the calling job, the called workflow will have the default permissions for
+    # the `GITHUB_TOKEN`."，而且被调用方**只能降不能升**。写在那边是没用的。
+    #
+    # `pull-requests: write` 除了摘标签还要**读锁评论**（PR 写锁那条路）。
+    # 少了它那条路会 403 变红 → 新 SHA 上没有 `review` → PR 被拦住。
+    #
+    # **这里没有 `contents: read`，也不该有**：这条路上一次 checkout 都不做。
+    permissions:
+      statuses: write       # 写 `review` 这个 commit status（两条路都写）
+      pull-requests: write  # 摘标签、读 PR 写锁的评论
+    # 按不可变 tag 钉，不按分支：`@main` 意味着 dev-infra 一次未经本仓评审的改动
+    # 当场在这里生效。升级 = 改这一行的版本号，而改这一行要在本仓被评审。
+    #
+    # **别往回钉到 v1.14.0 以前**：v1.11.0 才第一次带 PR 写锁；而 v1.11.0~v1.13.0
+    # 那三版里写锁的 `OK` 结论会在新 SHA 上写一条**绿的** `review`——
+    # 「`review` 缺席即拦」这条性质当场没了（GinkgoLeafLab/GTO-Trainer#189）。
+    uses: GinkgoLeafLab/dev-infra/.github/workflows/review-gate.yml@v1.15.0

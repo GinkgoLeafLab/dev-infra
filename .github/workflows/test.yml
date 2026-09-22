@@ -104,6 +104,17 @@ jobs:
         if: always()
         run: node adopt/adopt.test.js
 
+      # 本仓自己作为**消费者**的那一侧：两份 self-*.yml caller、指着树里 shared/ 的
+      # 守卫入口、PreToolUse 那一行、prepare、agent 定义和上游 tag 的比对。
+      # 这一节本来该由 `adopt/adopt.js --check` 管，但那个脚本在这个仓库里判不了
+      # （这儿那三个 caller 名字被可复用工作流本体占着，它按 caller 的形状去判本体，
+      # 每一条都是反的），所以它当场拒绝跑，接线改由这份测试钉着。
+      # **它要联网**（比对 .claude/agents/common 和 dev-agents 那个 tag）：
+      # 联不上是失败不是跳过——「比不了就算过」正是这套东西要消灭的那种绿。
+      - name: 本仓自己这一侧的接线
+        if: always()
+        run: node self-adopt.test.js
+
       # 下面跑的是 shared/ 那份源文件自己的测试。
       - name: 分支守卫（shared/）
         if: always()

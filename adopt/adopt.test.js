@@ -148,6 +148,44 @@ check("CJS 仓用 .js", A.shimPathFor({}), A.SHIM_PATH);
 check("没有 package.json 时用 .js", A.shimPathFor(null), A.SHIM_PATH);
 check("ESM 仓必须用 .cjs", A.shimPathFor({ type: "module" }), A.SHIM_PATH_CJS);
 
+/* —— 认出「目标仓库就是 dev-infra 自己」——
+   判错的方向在这一条上是不对称的：判成消费仓（漏判）会让脚本去动**可复用工作流本体**
+   那三个文件名，而那是各仓共用的唯一一份逻辑；判成自己（误判）最多是拒绝跑一次。
+   所以三条都在才算，而且判的是内容不是 remote url——镜像、fork、改过名字的克隆
+   都还是这个仓库，url 判据在那几种情况下正好往漏判的方向错。 */
+{
+  const REUSABLE = "name: review-gate (reusable)\non:\n  workflow_call:\n";
+  const CALLER = "name: review-gate\non:\n  pull_request_target:\n    types: [labeled, synchronize]\n";
+  const self = { reviewGateYml: REUSABLE, hasSharedGuard: true, hasAdoptScript: true };
+  check("三条都在 = 是 dev-infra 自己", A.detectSelfHost(self), true);
+  check("消费仓的 caller 不会被认成本体", A.detectSelfHost({ ...self, reviewGateYml: CALLER }), false);
+  check("挂了子模块但根上没有 adopt/ 的消费仓不算", A.detectSelfHost({ ...self, hasAdoptScript: false }), false);
+  check("没有 shared/guard-branch.js 不算", A.detectSelfHost({ ...self, hasSharedGuard: false }), false);
+  check("连 review-gate.yml 都没有的新仓不算", A.detectSelfHost({ ...self, reviewGateYml: null }), false);
+  /* 注释里提过 workflow_call 不算数：可复用工作流的 caller 模板里逐字写着这个词
+     （它在解释「为什么触发器必须留在 caller」），照原文判会把消费仓判成本体，
+     于是脚本在一个真的消费仓里拒绝跑——那一头也不能错。 */
+  check("注释里写着 workflow_call 不算",
+    A.detectSelfHost({ ...self, reviewGateYml: "# 可复用工作流没有自己的触发器（workflow_call:）\n" + CALLER }), false);
+}
+
+/* —— 守卫入口的那条相对路径可以换 ——
+   dev-infra 自己那一侧指的是树里的 shared/（它不挂指回自己的子模块）。
+   渲染出来的两份除了那一行必须完全一样：各仓不该各有一份不一样的守卫入口，
+   本仓那份由 self-adopt.test.js 逐字节钉着。 */
+{
+  const tpl = fs.readFileSync(path.join(__dirname, "templates", "guard-hook.js"), "utf8");
+  const consumer = A.renderShim(tpl);
+  const self = A.renderShim(tpl, A.SELF_GUARD_REL);
+  check("默认还是消费仓那条路径", consumer.includes('"vendor", "dev-infra"'), true);
+  check("本仓那条路径指到树里的 shared/", self.includes('path.join(__dirname, "..", "shared", "guard-branch.js")'), true);
+  check("两份只差那一行",
+    consumer.split("\n").filter((l) => !l.includes("const GUARD = ")).join("\n"),
+    self.split("\n").filter((l) => !l.includes("const GUARD = ")).join("\n"));
+  throws("模板里没有那个占位符时要炸，不许静默出一份指不到任何地方的入口",
+    () => A.renderShim("const GUARD = 1;\n"), /渲染没命中/);
+}
+
 /* —— settings.json 的接线 —— */
 {
   const a = A.mergeSettings({});
