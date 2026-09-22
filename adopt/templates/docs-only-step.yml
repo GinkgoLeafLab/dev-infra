@@ -1,0 +1,34 @@
+# 「纯文档改动」判定：**这不是一份 caller，是一个步骤**，抄进本仓已有的那个 job 里。
+# 判定完自己用 `if:` 决定跳过哪几步——跳哪几步逐仓不同，判定这件事所有仓一模一样。
+#
+# 三条容易写错的：
+#   - **跳过的是 job 里的步骤，不是 job**，更不是 `paths` / `paths-ignore`。
+#     `test` 那条是必需检查，被 workflow 级过滤跳过的 PR 上这个检查根本不会产生，
+#     表现为永远 pending、那个 PR 永远合不了。
+#   - **这个 job 要 checkout，所以它确实需要 `contents: read`**——
+#     另外三份 caller 都没有 `contents: read`，那条别推广到这里。
+#   - **判定绿了不代表那件事做了。** 跳过时它会在检查页上打一条 ::notice::，
+#     `skipped:` 就是那句话里的宾语，写准它。
+
+      - uses: actions/checkout@v7
+        with:
+          # 判定要 diff base 和 head 两个 commit，浅克隆里 base 根本不存在。
+          # **这一行是前提，不是优化。**
+          fetch-depth: 0
+
+      - name: 判断是不是纯文档改动
+        id: scope
+        uses: GinkgoLeafLab/dev-infra/.github/actions/docs-only@__INFRA_TAG__
+        with:
+          base: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          head: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          # PR 的改动要相对**分叉点**算（三点 diff），否则 base 分支自己往前走一步，
+          # 别人的改动就会被算进这个 PR。推送到主干是两点 diff。
+          merge-base: ${{ github.event_name == 'pull_request' }}
+          # 只改那条 ::notice:: 的措辞，判定逻辑不受它影响。不给就是「npm test」。
+          skipped: npm test
+
+      - run: npm ci
+        if: steps.scope.outputs.docs_only != 'true'
+      - run: npm test
+        if: steps.scope.outputs.docs_only != 'true'

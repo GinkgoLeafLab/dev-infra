@@ -94,6 +94,16 @@ jobs:
         if: always()
         run: node submodule-shape.test.js
 
+      # 接入脚本。它判错的后果是**「报告说装好了，其实没装」**——而它装的每一层失效
+      # 都是静默的，所以这条不只验纯函数：端到端那一半会在临时目录里真的 git init
+      # 两种消费仓（CJS 和 `"type": "module"`）、真的挂子模块、真的 subtree、
+      # 真的喂一条 hook JSON 给守卫看它拦不拦得住。
+      # **它要 `git subtree`**（runner 自带的 git 里有）；没有的话那一节会出声地失败，
+      # 不会静默跳过——那一半验的正是「真的接得上」。
+      - name: 接入脚本（adopt/）
+        if: always()
+        run: node adopt/adopt.test.js
+
       # 下面跑的是 shared/ 那份源文件自己的测试。
       - name: 分支守卫（shared/）
         if: always()

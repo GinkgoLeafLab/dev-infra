@@ -1,0 +1,60 @@
+name: qa-gate
+
+# 把「这个 PR 要不要 QA、这一版过没过」变成一个挂在 PR head SHA 上的必需检查 `qa`。
+#
+# **逻辑不在这儿**：可复用工作流在 GinkgoLeafLab/dev-infra 的
+# .github/workflows/qa-gate.yml，判定脚本跟着那边的**组合动作** .github/actions/qa-gate
+# 一起下发到 runner，各仓库共用同一份。这份文件是 dev-infra 的 adopt 脚本按模板生成的。
+#
+# **装了它就要同时做两件事，缺一件这个门就是坏的**：
+#   1. labels-sync 的 caller 里 `qa-labels: true`（否则 qa-required / qa-passed
+#      这两个标签在这个仓库里根本不存在，而 GitHub 对打一个不存在的标签是**静默不打**）
+#   2. 去仓库设置里把 `qa` 钉成必需检查（那一层 agent 改不了，人去网页上点）
+#
+# **这一份和 review-gate.yml 的触发集合长得很像，但不是同一个东西**：
+# 两边都跑 synchronize，为的是两件不同的事——review-gate 那条是 PR 写锁
+# （有评审在飞且被顶掉时把 `review` 写红，没锁在飞时什么都不写、`review` 保持缺席）；
+# 这条是「每一版都必须报告一次 `qa`」。因为 `qa` 是必需检查而 QA 本身是可选的：
+# 一个不需要 QA 的 PR 上也必须有人报告 `qa`，否则它会永远停在
+# "Expected — waiting for status"。所以「不需要 QA」不是「不报告」，
+# 而是报告一个 **`success`**，描述里写明「未标记需要 QA」。
+#
+# 这个 workflow 自己会产生一个 "qa-gate / …" 形状的检查——**那不是必需检查**，
+# ruleset 里要钉的是被调用方用 API 写出来的那个 `qa`，别钉错。
+
+on:
+  # pull_request_target 而不是 pull_request：定义取自默认分支，所以 PR 里改不动这个门
+  # （和 review-gate.yml 同理，那里的长注释不在这儿重复一遍）。
+  pull_request_target:
+    # **synchronize 一条都不能少**：推了新 commit 就是新 SHA，新 SHA 上必须重新报告
+    # 一次。漏报一次，那个 PR 就永远停在 "Expected — waiting for status"。
+    # **同理这里不许加 `paths` / `paths-ignore`。**
+    types: [opened, reopened, synchronize, labeled, unlabeled]
+
+permissions: {}
+
+concurrency:
+  group: qa-gate-${{ github.event.pull_request.number }}
+  # 跑到一半被砍会留下「标签摘了但检查没写」，不取消。
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    # 标签事件只认 qa-* 那两个。**这一条是账单前提，不是过滤器**：写在 job 级的 if 上，
+    # 别的标签（review-passed、documentation…）连 runner 都不会起、不花配额。
+    # 搬进 dev-infra 那份就变成「起了 runner 再判断」，功能完全正常、只有账单变了。
+    if: >-
+      (github.event.action != 'labeled' && github.event.action != 'unlabeled')
+      || startsWith(github.event.label.name, 'qa-')
+    # 权限必须在这儿要：官方明写权限取自 calling job，被调用方**只能降不能升**。
+    #
+    # **这里没有 `contents: read`，也不该有。** 判定脚本跟着组合动作下发，这条路上
+    # 一次 checkout 都不做。谁要是把 checkout 加回来，会因为这里没给 contents 而以
+    # `remote: Repository not found` 红掉——那条报错指不到权限上
+    # （在 GinkgoLeafLab/GTO-Trainer 上为它连红过两次）。
+    permissions:
+      statuses: write       # 写 `qa` 这个 commit status
+      pull-requests: write  # 摘 qa-passed 标签
+    # 按不可变 tag 钉，不按分支。**dev-infra 的 tag 不移动**，所以升级 = 改这一行的
+    # 版本号，而改这一行要在本仓被评审——「未经各仓评审的改动不会生效」就落在这儿。
+    uses: GinkgoLeafLab/dev-infra/.github/workflows/qa-gate.yml@__INFRA_TAG__
