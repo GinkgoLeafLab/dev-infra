@@ -175,10 +175,10 @@ const G = (cwd, ...a) => execFileSync("git",
    "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main", ...a],
   { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 
-function node(cwd, args) {
+function node(cwd, args, extraEnv) {
   try {
     return { ok: true, out: execFileSync(process.execPath, args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "protocol.file.allow", GIT_CONFIG_VALUE_0: "always" } }) };
+      env: { ...process.env, GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "protocol.file.allow", GIT_CONFIG_VALUE_0: "always", ...extraEnv } }) };
   } catch (e) {
     return { ok: false, out: ((e.stdout || "") + (e.stderr || "")).trim() };
   }
@@ -220,6 +220,10 @@ function e2e(variant, consumerPkg, wantShim, deep) {
     const repo = path.join(tmp, "consumer");
     fs.mkdirSync(repo);
     G(repo, "init", "-q");
+    /* 真仓库里身份是配好的（全局或仓库本地）。**配在仓库本地而不是靠 `-c` 传**：
+       adopt 跑的是自己的 git 子进程，`-c` 传给测试这个 helper 的那几个它看不见——
+       CI 上正是这么红的（`fatal: empty ident name`）。 */
+    G(repo, "config", "user.email", "t@t"); G(repo, "config", "user.name", "t");
     fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify(consumerPkg, null, 2) + "\n");
     G(repo, "add", "-A"); G(repo, "commit", "-qm", "init");
     G(repo, "switch", "-q", "-c", "chore/接入共享基础设施");
@@ -234,25 +238,37 @@ function e2e(variant, consumerPkg, wantShim, deep) {
     check(`${variant}：拒绝的理由是分支，不是别的`, /受保护分支/.test(onMain.out), true);
     G(repo, "switch", "-q", "chore/接入共享基础设施");
 
+    /* **提交要有身份，而接 agent 定义那一步会提交**（subtree 自己造那两个提交）。
+       没身份的机器上 git 是 `fatal: empty ident name`——dev-infra 自己的 runner
+       上实测撞到过。要在**动手之前**拒绝：升级那条路会先 `git rm -r` 并提交，
+       在那之后失败留下的是「一个角色都没有」的那一版。 */
+    const noIdent = node(repo, [...base, "--qa"], { GIT_COMMITTER_NAME: "", GIT_AUTHOR_NAME: "" });
+    check(`${variant}：说不出提交者是谁时拒绝动手`, noIdent.ok, false);
+    check(`${variant}：而且是在写任何东西之前拒绝的`, fs.existsSync(path.join(repo, ".github/workflows/review-gate.yml")), false);
+
     /* 接入 */
     const run1 = node(repo, [...base, "--qa"]);
     check(`${variant}：接入跑成` + (run1.ok ? "" : `（${run1.out.split("\n").filter((l) => /❌/.test(l)).join(" / ")}）`), run1.ok, true);
 
-    const read = (p) => fs.readFileSync(path.join(repo, p), "utf8");
+    /* 读不到就返回空串，**不抛**：一条断言失败不该把后面所有断言连跑的机会都拿走
+       （CI 上就是这样——subtree 一挂，ESM 那一轮整轮没跑，而报告里只有一条 ✗）。 */
+    const read = (p) => { try { return fs.readFileSync(path.join(repo, p), "utf8"); } catch (e) { return ""; } };
+    const readJson = (p) => { try { return JSON.parse(read(p)); } catch (e) { return {}; } };
     const has = (p) => fs.existsSync(path.join(repo, p));
     check(`${variant}：写了 review-gate caller`, /@v9\.9\.0\s*$/m.test(read(".github/workflows/review-gate.yml")), true);
     check(`${variant}：写了 qa-gate caller`, has(".github/workflows/qa-gate.yml"), true);
     check(`${variant}：qa-labels 跟着 --qa 置 true`, /qa-labels:\s*true/.test(read(".github/workflows/labels-sync.yml")), true);
     check(`${variant}：守卫入口的扩展名跟着模块系统走`, has(wantShim), true);
     check(`${variant}：PreToolUse 指向守卫入口`,
-      JSON.stringify(JSON.parse(read(".claude/settings.json"))).includes(wantShim), true);
-    check(`${variant}：package.json 接上 prepare`, JSON.parse(read("package.json")).scripts.prepare, A.PREPARE);
+      JSON.stringify(readJson(".claude/settings.json")).includes(wantShim), true);
+    check(`${variant}：package.json 接上 prepare`, (readJson("package.json").scripts || {}).prepare, A.PREPARE);
     check(`${variant}：子模块是 gitlink（160000）`, G(repo, "ls-files", "-s", "--", "vendor/dev-infra").trim().split(/\s+/)[0], "160000");
     check(`${variant}：子模块钉在那个 tag 上`,
       G(repo, "ls-files", "-s", "--", "vendor/dev-infra").trim().split(/\s+/)[1],
       G(infra, "rev-parse", "v9.9.0^{commit}").trim());
-    check(`${variant}：agent 定义接进来了`, fs.readdirSync(path.join(repo, ".claude/agents/common")).filter((f) => f.endsWith(".md")).length, 3);
-    check(`${variant}：VERSION 记着 tag`, JSON.parse(read(".claude/agents-common.VERSION")).tag, "v1.0.0");
+    const roles = (p) => { try { return fs.readdirSync(path.join(repo, p)).filter((f) => f.endsWith(".md")).length; } catch (e) { return 0; } };
+    check(`${variant}：agent 定义接进来了`, roles(".claude/agents/common"), 3);
+    check(`${variant}：VERSION 记着 tag`, readJson(".claude/agents-common.VERSION").tag, "v1.0.0");
     check(`${variant}：装了 skill 存根`, has(".claude/skills/dev-infra/SKILL.md"), true);
 
     /* 守卫真的拦得住吗：不问形状，直接喂一条 hook JSON 进去。
@@ -308,10 +324,8 @@ function e2e(variant, consumerPkg, wantShim, deep) {
     G(repo, "checkout", "--", ".");
     const run2 = node(repo, [...base, "--qa"]);
     check("再跑一次仍然是绿的", run2.ok, true);
-    check("PreToolUse 没有被加第二条",
-      JSON.parse(fs.readFileSync(path.join(repo, ".claude/settings.json"), "utf8")).hooks.PreToolUse.length, 1);
-    check("再跑一次不重复接 subtree",
-      fs.readdirSync(path.join(repo, ".claude/agents/common")).filter((f) => f.endsWith(".md")).length, 3);
+    check("PreToolUse 没有被加第二条", (readJson(".claude/settings.json").hooks || {}).PreToolUse.length, 1);
+    check("再跑一次不重复接 subtree", roles(".claude/agents/common"), 3);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

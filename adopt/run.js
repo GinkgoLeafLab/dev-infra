@@ -51,6 +51,21 @@ module.exports = function run(A) {
         "   git switch -c chore/接入共享基础设施");
       process.exit(1);
     }
+    /* **提交要有身份，而这一步会提交**（`git subtree add` 自己造那两个提交）。
+       没配 user.name / user.email 的机器上（容器、CI runner、刚装好的开发机）
+       git 是 `fatal: empty ident name … not allowed`——在 dev-infra 自己的 runner 上
+       实测撞到过。放到这儿拦，而不是等 subtree 跑到一半：**升级那条路会先
+       `git rm -r` 并提交**，在那之后失败留下的是「一个角色都没有」的那一版。
+       脚本不替谁编一个身份出来：那会把一条假的作者信息写进别人的仓库历史。 */
+    const ident = tryGit(["var", "GIT_COMMITTER_IDENT"]);
+    if (doAgents && !ident.ok) {
+      console.error(`${BAD} git 说不出提交者是谁（${ident.out.split("\n")[0]}），而接 agent 定义那一步要提交。\n` +
+        "   先配上身份再来：\n" +
+        "     git config user.name  \"你的名字\"\n" +
+        "     git config user.email \"你的邮箱\"\n" +
+        "   或者这次加 --no-agents 只接另外两层（那两层一个提交都不造）。");
+      process.exit(1);
+    }
     if (dirty && doAgents) {
       console.error(`${BAD} 工作区不干净，而接 agent 定义那一步（git subtree add）要求索引干净——\n` +
         "   它自己的 ensure_clean 会 die，没有 --force 之类的口子。先把手上的改动提交掉，\n" +
