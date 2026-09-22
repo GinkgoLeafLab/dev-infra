@@ -38,13 +38,27 @@ const { spawnSync } = require("child_process");
    新增一类文件默认走「跑测试」那边，要它被跳过得有人显式加进来并补上断言。
 
    - docs/ 下的一切
-   - 任何位置的 .md：CLAUDE.md、README.md、.claude/ 下的角色与规则都在这儿
+   - 任何位置的 .md，**`.claude/` 目录之下的除外**
 
    **这两条成立靠一个前提，而那个前提在每个用这个动作的仓里各自成立、各自会坏**：
    那个仓里没有任何构建或测试去读 docs/ 与 .md，发布件也不含它们。
    哪天某个仓开始拿 docs/ 当测试夹具、或者把某份 .md 打进产物，**这条白名单在那个仓
    当场作废**，要么收窄、要么那个仓不该用这个动作。**这份文件替谁都断言不了这件事**：
    它下发到所有仓、看不见任何一个仓的构建。第一次接上的时候核一遍，别默认它成立。
+
+   **`.claude/` 下的 .md 已经在至少一个消费仓里坏掉了，这条不是假设性的：**
+   `GTO-Trainer` 的 `scripts/agents-skills.test.js`（`npm test` 会跑）把
+   `.claude/agents/` 下每份角色定义的 frontmatter、各份 `SKILL.md` 的 description 与
+   `disable-model-invocation`、`.claude/rules/` 下每份规则的 `paths:` 当输入读——
+   那儿的 `.md` 是**配置**，不是文档。一个只改角色定义 `skills:` 那一行、
+   或只改某份 `SKILL.md` 的 PR 全是 `.md`，原白名单会把它判成纯文档，
+   `npm test` 因此被跳过，而**这条守卫恰好在它唯一要守的那类改动上不跑**——
+   `test` 检查照样绿，PR 却带着一个从没跑过的四条门禁（frontmatter、skill 名、
+   `disable-model-invocation`、`paths:`）合了进去。收窄之后这类改动落回「跑测试」
+   那一侧，代价是**别的消费仓**（`.claude/` 下没有类似断言的那些）改这类 `.md`
+   也要多跑一遍测试——方向没错：白名单本来就只该放「绝无可能让测试变红」的路径，
+   而 `.claude/` 已经不在这一档了，多花的几分钟是刻意换来的，不是误伤。
+   见 `GinkgoLeafLab/GTO-Trainer` 的 `.claude/skills/ci-dev-rules/SKILL.md`。
 
    刻意不含 .claude/settings.json（它配的是本地 hook 与权限）、.github/ 下的
    **非 .md 文件**（workflow 定义）、.gitignore ——它们不是文档，
@@ -53,7 +67,14 @@ const { spawnSync } = require("child_process");
 function isDocFile(f) {
   if (typeof f !== "string" || f === "") return false;
   if (f.startsWith("docs/")) return true;
-  if (f.endsWith(".md")) return true;
+  /* 路径段匹配，不是「开头是不是 .claude/」。理由不在「Claude Code 会不会加载
+     子目录里那一份」上——**本仓 README 写着 `.claude/skills/` 只在项目根那一层被扫**，
+     别在这儿留一句和它对着来的话。理由是判定这一侧的：`sub/` 底下同样可能是
+     另一个项目根（monorepo、嵌套的克隆）的配置目录，那儿的 .md 一样是配置不是文档，
+     而判成非文档是安全的那一侧——最多多跑一遍测试。
+     反过来 `src/my.claude.md`、`.claudeignore.md` 只是文件名里带这几个字符，
+     不构成这个目录段，不该被误伤。 */
+  if (f.endsWith(".md")) return !/(^|\/)\.claude\//.test(f);
   return false;
 }
 
