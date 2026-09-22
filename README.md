@@ -13,6 +13,7 @@
 | `.github/actions/labels-sync/` | 组合动作 + 同步脚本 + 它的测试 + **共享的标签清单** | **不直接用**，由上面那份工作流调 |
 | `.github/actions/docs-only/` | 组合动作 + 纯文档判定 + 它的测试 | **各仓的 workflow 直接 `uses:` 它**，当成一个步骤用 |
 | `shared/` | **第二层的源文件**：必须躺在各仓里才会被读到的那几份脚本与它们的测试 | 各仓把这个仓库整个当 **git submodule** 挂在 `vendor/dev-infra`，**不再各自落一份本地副本**。`core.hooksPath` 直接指进 `vendor/dev-infra/shared/githooks`；**PreToolUse hook 不直接指进子模块**，它走各仓自己那份 tracked 的 `scripts/guard-hook.js` 转接——子模块可以是空的，而空的时候 `node <缺失路径>` 是「非零退出、stdout 一个字节都没有」，PreToolUse 把它当 non-blocking error、**命令照常执行**（= 守卫静默放行） |
+| `adopt/` | **把一个仓库接上这套东西的脚本 + 那份 Skill**：写三份 caller、挂子模块、下发守卫入口、接 agent 定义的 subtree，以及事后 `--check` 体检同一套接线 | 接入时跑一次；之后每次升级 / 排查再跑 `--check` |
 | `.github/workflows/test.yml` | 本仓自己的测试，连同 `shared/` 里那份套件 | 不适用 |
 | `submodule-shape.test.js` + `.gitattributes` | 钉住「各仓把这里当 submodule 挂上会拿到什么」 | 不适用 |
 
@@ -404,6 +405,59 @@ PreToolUse 把非零退出当 non-blocking error——**守卫静默放行**；
 反过来，消费仓也没法「只拿一部分」：submodule 只能整体挂在某个 commit 上，
 没有「拿了」和「刻意不拿」这种按文件取舍——一个仓要么挂着这个 submodule
 看到 `shared/` 此刻长的样子，要么根本不挂、什么都看不到。
+
+## `adopt/`：把一个仓库接上来
+
+各仓要接的东西分散在四处（三份 caller、一个 submodule、一份 tracked 的守卫入口转接、
+一条 subtree），**每一处漏了都不报错**。所以接入这件事本身收成一个脚本和一份 Skill：
+
+```bash
+# 全新仓库：先把脚本弄到盘上，它自己会把子模块挂好、钉在最新的 vX.Y.Z 上
+git clone --depth 1 https://github.com/GinkgoLeafLab/dev-infra /tmp/dev-infra
+node /tmp/dev-infra/adopt/adopt.js            # 要 QA 门禁就加 --qa
+
+# 已经接过的仓库：用自己那份（它就在子模块里），--check 一个字节都不写
+node vendor/dev-infra/adopt/adopt.js --check
+```
+
+| 在这儿 | 是什么 |
+|---|---|
+| `adopt/adopt.js` | 入口，以及**判定与渲染那一半**（纯函数：选 tag、渲染 caller、体检 caller、并 settings / package.json） |
+| `adopt/run.js` | **真的动盘上的东西那一半**：问 git、读写文件、按顺序跑那几步、打结论 |
+| `adopt/templates/` | 三份 caller、守卫入口转接、`docs-only` 那个步骤的片段 |
+| `adopt/SKILL.md` | 给 agent 的那份：前提、每一条 ❌ 怎么办、PR 怎么开、永远不要做的几件事 |
+| `adopt/adopt.test.js` | 它的测试，含两种消费仓（CJS / **`"type": "module"`**）的端到端 |
+
+**它的失败方向和别处不同，单独说**：这个脚本是装门的，所以最严重的错是
+「报告说装好了，其实没装」。因此**判不了一律算不通过**（取不到上游 tag、读不出文件都是
+❌，退出码非零），**已存在的东西一律不覆盖**（要覆盖得显式给 `--force`），
+**认不出的参数直接报错**（`--no-agent` 少个 s 被静默忽略的话，它会去动使用者刚说不要动的东西）。
+
+**它不提交、不推送**，唯一的例外是 `git subtree add` 自己造的那两个提交（绕不开）。
+**它也不碰第三层**（ruleset、必需检查、Environment 凭据）——那一层人去网页上点，
+脚本只把清单打出来，永远不会说那一层「已完成」。
+
+**为什么它在这个仓库，而不属于 `shared/`**：判据仍然是「谁在调它」。`shared/` 那几份的
+调用方是各仓本地的一条路径（`core.hooksPath`、`npm prepare`、PreToolUse），**必须躺在各仓里
+才会被读到**；这个脚本的调用方是人/agent 手敲的一次命令，它跟着子模块一起到各仓只是顺带
+（接入那一刻子模块还不存在，所以它也必须能从一个临时克隆里跑）。
+
+**`adopt/package.json` 那一行 `{"type":"commonjs"}` 和 `shared/` 那一份是同一个坑**：
+消费仓是以路径直接 `node vendor/dev-infra/adopt/adopt.js` 调它的，node 按**离文件最近的
+package.json** 决定模块系统，往上找到的第一份会是消费仓自己那份。`adopt/adopt.test.js`
+里有它的正对照（真的删掉那份、真的在 ESM 消费仓里跑一次，必须炸）。
+
+**这个脚本发到各仓的那份守卫入口转接，扩展名跟着消费仓的模块系统走**
+（CJS 仓 `scripts/guard-hook.js`，`"type": "module"` 的仓 `scripts/guard-hook.cjs`）——
+那份文件住在**消费仓**里，塞不了 package.json 去挡（那会把 `scripts/` 变成一个 npm 包），
+而 ESM 仓里 `.js` 被当成 ESM 加载就是 `require` 当场 ReferenceError → PreToolUse 把
+非零退出当 non-blocking error → **命令照常执行，守卫静默放行**。`--check` 专门查这一条。
+
+**那份 Skill 怎么被读到**：`.claude/skills/` 只在项目根那一层被扫，子模块里的不算。
+所以脚本会在消费仓写一份 `.claude/skills/dev-infra/SKILL.md` **存根**——它只有几行，
+指向 `vendor/dev-infra/adopt/SKILL.md`（**刻意不抄正文**：抄一份就会漂，而漂了不报错）。
+第一次接入时子模块还不存在，那时直接把临时克隆里的 `adopt/SKILL.md` 读给 agent 就行；
+想让它在每个仓库都常驻，把那份拷进 `~/.claude/skills/dev-infra/SKILL.md`。
 
 ## 这里放什么、不放什么
 
