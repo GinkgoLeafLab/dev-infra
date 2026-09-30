@@ -174,8 +174,34 @@ throws("三个星号", "***/x.md");
 throws("整个模式就是 **", "**");
 throws("多行里有一行坏了整个参数作废", "**/矩阵.md" + NL + "docs/**");
 throws("以 / 开头", "/矩阵.md");
-throws("以 ./ 开头", "./矩阵.md");
+throws("以 ./ 开头", "./x.md");
+/* 以 / 结尾：想拦一整个目录，写出来的却是永远命不中的东西（模式匹配的是文件路径），
+   和 `docs/**` 是同一种错，必须同样被拒——否则静默落到「跳过测试」 */
+throws("以 / 结尾（src/modules/）", "src/modules/");
+throws("以 / 结尾（src/modules/**/）", "src/modules/**/");
+throws("整个模式就是 **/", "**/");
+throws("以 / 结尾（docs/方案/）", "docs/方案/");
+throws("中间有 //（a//b.md）", "a//b.md");
+throws("中间有 . 段（a/./b.md）", "a/./b.md");
+throws("中间有 .. 段（a/../b.md）", "a/../b.md");
+throws("以 ../ 开头", "../x.md");
+throws("整个模式就是 .", ".");
+throws("整个模式就是 ..", "..");
+throws("多行里有一行以 / 结尾整个参数作废", "**/矩阵.md" + NL + "src/modules/");
+throws("行尾空白被 trim 之后以 / 结尾", "src/modules/  ");
 throws("不是字符串", 42);
+/* 正对照：逐段检查不许误伤合法的写法——`.` `..` 只有**整段**等于它们才算，
+   段里含点、隐藏目录、三个点都是普通名字 */
+function accepts(name, raw, file) {
+  let got;
+  try { got = isDocsOnly([file], parseNotDocs(raw)); } catch (e) { got = "抛了：" + e.message; }
+  check("parseNotDocs 接受：" + name, got, false);
+}
+accepts("名字里带两个点（a..b）", "**/a..b.md", "docs/x/a..b.md");
+accepts("隐藏目录（.github）", ".github/*.md", ".github/x.md");
+accepts("段的开头是点（.hidden）", "**/.hidden.md", "docs/.hidden.md");
+accepts("三个点的段", "a/.../b.md", "a/.../b.md");
+accepts("**/ 在中间", "src/**/矩阵.md", "src/a/矩阵.md");
 check("parseNotDocs：不给就是空列表", parseNotDocs(undefined).length, 0);
 check("parseNotDocs：一行一条", parseNotDocs("a/*.md" + NL + NL + "**/b.md").length, 2);
 
@@ -329,16 +355,32 @@ check("真 git：多行参数没有一行命中就仍是纯文档", cli(ND.dir, 
 
 /* 失败方向：参数解析出错 → 跑测试 + 出声。区间本身是纯文档（正对照见上），
    所以「true」只可能来自「把坏参数当成没传」——那正是这里要拦的。 */
-for (const [name, raw] of [
+const BAD_RAW = [
   ["结尾的 **", "docs/**"],
   ["** 不成 **/", "a**b/矩阵.md"],
   ["以 / 开头", "/矩阵.md"],
+  ["以 ./ 开头", "./x.md"],
+  ["以 / 结尾（src/modules/）", "src/modules/"],
+  ["以 / 结尾（src/modules/**/）", "src/modules/**/"],
+  ["整个模式就是 **/", "**/"],
+  ["以 / 结尾（docs/方案/）", "docs/方案/"],
+  ["以 / 结尾（docs/方案/**/）", "docs/方案/**/"],
+  ["中间有 //", "a//b.md"],
+  ["中间有 . 段", "a/./b.md"],
+  ["中间有 .. 段", "a/../b.md"],
   ["好的一行 + 坏的一行", "**/矩阵.md" + NL + "docs/**"],
-]) {
-  const r = cli(ND.dir, [pFrom, pTo, ndArg(raw)]);
-  check(`失败方向：${name} → 按跑测试处理`, r.value, "false");
-  check(`失败方向：${name} → 出声`, /::warning::[^\n]*not-docs/.test(r.stdout), true);
-  check(`失败方向：${name} → 没有 notice`, /::notice::/.test(r.stdout), false);
+  ["好的一行 + 以 / 结尾的一行", "**/矩阵.md" + NL + "src/modules/"],
+];
+/* 两个区间：pFrom..pTo 是 src/a.md + docs/a.md，dFrom..dTo 是只改 docs/方案/ 下一份 md——
+   后者正是「想拦 docs/方案/ 这个目录」那种写法最容易撞上的区间。两边按老规则都是纯文档。 */
+for (const [rangeName, from, to] of [["src+docs", pFrom, pTo], ["docs/方案", dFrom, dTo]]) {
+  check(`失败方向的正对照：${rangeName} 区间不带参数是纯文档`, cli(ND.dir, [from, to]).value, "true");
+  for (const [name, raw] of BAD_RAW) {
+    const r = cli(ND.dir, [from, to, ndArg(raw)]);
+    check(`失败方向（${rangeName}）：${name} → 按跑测试处理`, r.value, "false");
+    check(`失败方向（${rangeName}）：${name} → 出声`, /::warning::[^\n]*not-docs/.test(r.stdout), true);
+    check(`失败方向（${rangeName}）：${name} → 没有 notice`, /::notice::/.test(r.stdout), false);
+  }
 }
 const bare = cli(ND.dir, [pFrom, pTo, "--not-docs"]);
 check("失败方向：光秃秃的 --not-docs（漏了 =）→ 按跑测试处理", bare.value, "false");
@@ -380,10 +422,11 @@ function extractRun() {
 }
 const RUN_BODY = extractRun();
 
-/* action.yml 的 env 那几行**跑不到**：下面那几条是自己塞 DOCS_ONLY_* 环境变量的
-   （runner 上那一步才是 `${{ inputs.x }}` 展开出来的）。所以引用了一个没声明的
-   input 这件事，执行验不到——GitHub 那边它会安静地展开成空串，
-   表现是「--skipped 或 --merge-base 悄悄失效」，判定照常绿。这里单独对一遍。 */
+/* action.yml 的 env 那几行**跑不到**：下面动作层那几条是自己按名字塞 DOCS_ONLY_* 环境变量的
+   （runner 上那一步才是 `${{ inputs.x }}` 展开出来的），**根本没经过 env: 块**。
+   所以 env: 那一侧写错——引用了没声明的 input、键名和 run 里读的对不上——执行验不到：
+   GitHub 那边它会安静地展开成空串，表现是「--skipped、--merge-base 或 --not-docs 悄悄失效」，
+   判定照常绿。下面对 env: 块和 run 块**按文本单独钉一遍**。 */
 function actionYaml() {
   return fs.readFileSync(path.join(__dirname, "action.yml"), "utf8");
 }
@@ -409,6 +452,43 @@ check("not-docs 声明了也引用了", DECLARED.includes("not-docs") && REFEREN
 
 /* 抽空了的解析器会让下面每一条都变成空跑，而且全绿——先把这件事排除掉。 */
 check("抽得出 action.yml 里那段 run", /node "\$GITHUB_ACTION_PATH\/docs-only\.js"/.test(RUN_BODY), true);
+
+/* env: 块逐行钉住：键名 → 它必须取自哪个 input。
+   按**行**扫、行首只许空白缩进——注释里、description 里出现同样的字不算数
+   （那是评审实测过的漏网：把这一行改成 `DOCS_ONLY_NOTDOCS: ${{ inputs.not-docs }}`，
+   动作层照样全绿，因为动作层压根不读 env: 块）。
+   只抽 env: 块之内的行，不是全文——别处（例如 description 里）多出来的同形状的行不能替它凑数。 */
+const ENV_MAP = {
+  DOCS_ONLY_BASE: "base",
+  DOCS_ONLY_HEAD: "head",
+  DOCS_ONLY_MERGE_BASE: "merge-base",
+  DOCS_ONLY_SKIPPED: "skipped",
+  DOCS_ONLY_NOT_DOCS: "not-docs",
+};
+function extractEnvLines() {
+  const lines = actionYaml().split("\n");
+  const i = lines.findIndex((l) => /^\s*env:\s*$/.test(l));
+  if (i < 0) throw new Error("action.yml 里找不到 `env:`");
+  const keyIndent = lines[i].match(/^\s*/)[0].length;
+  const out = [];
+  for (let j = i + 1; j < lines.length; j++) {
+    if (lines[j].trim() === "") continue;
+    if (lines[j].match(/^\s*/)[0].length <= keyIndent) break;
+    out.push(lines[j]);
+  }
+  return out;
+}
+const ENV_LINES = extractEnvLines();
+/* 正对照：抽空了或抽多了，下面「恰好一行」就成了空跑 */
+check("env: 块里抽得到的行数等于表里的键数", ENV_LINES.length, Object.keys(ENV_MAP).length);
+for (const [key, input] of Object.entries(ENV_MAP)) {
+  const re = new RegExp(`^\\s*${key}:\\s*\\$\\{\\{\\s*inputs\\.${input}\\s*\\}\\}\\s*$`);
+  check(`env: 块里恰好有一行 ${key} 取自 inputs.${input}`, ENV_LINES.filter((l) => re.test(l)).length, 1);
+}
+/* run 块读的名字与 env: 块声明的名字必须是同一批：任何一侧改名，另一侧会读到空串 */
+const RUN_USED = [...new Set([...RUN_BODY.matchAll(/\$\{?(DOCS_ONLY_[A-Z_]+)/g)].map((m) => m[1]))].sort();
+check("run 块读的 DOCS_ONLY_* 与 env: 块声明的是同一批",
+  RUN_USED.join("、"), Object.keys(ENV_MAP).sort().join("、"));
 
 if (process.platform === "win32") {
   /* 出声地跳过：这个仓的 CI 只有 ubuntu，而这段是 bash（数组语法）。
@@ -453,11 +533,13 @@ if (process.platform === "win32") {
   check("动作层：判定失败也不让这一步红", shallow.code, 0);
 
   /* not-docs 走环境变量、用数组追加：值里有换行、中文、空格和 `*`。
-     每一种写坏的方式都对应一条会红的断言（做过变异验证，见下面每条的说明）：
+     **这一层覆盖的是 run 块**（act() 自己按名字塞环境变量，不经过 env: 块）：
      - 掉了 `if [ -n ... ]` 那一段 → 「动作层：not-docs 传得到」红
      - `"--not-docs=$X"` 掉了引号 → 值被词分割，第二行起的模式丢了，「第二行命中」红；
        `*` 还会被当路径展开
-     - 环境变量名对不上 → 同样「传得到」红 */
+     - run 块里读的变量名和 act() 塞的对不上 → 同样「传得到」红
+     **env: 块那一侧不在这一层**：键名写错、input 名写错，这里全绿，
+     由上面「env: 块里恰好有一行 …」那几条按文本钉。 */
   const ndAct = (over) => act({ cwd: ND.dir, ...over });
   check("动作层：not-docs 不传时矩阵按老规则是纯文档（正对照）", ndAct({ base: mFrom, head: mTo }).value, "true");
   const withNd = ndAct({ base: mFrom, head: mTo, notDocs: MATRIX });
@@ -477,6 +559,9 @@ if (process.platform === "win32") {
   check("动作层：not-docs 写法不认识按跑测试处理", badNd.value, "false");
   check("动作层：not-docs 写法不认识要出声", /::warning::/.test(badNd.stdout), true);
   check("动作层：not-docs 写法不认识也不让这一步红", badNd.code, 0);
+  const slashNd = ndAct({ base: dFrom, head: dTo, notDocs: "docs/方案/" });
+  check("动作层：not-docs 以 / 结尾按跑测试处理", slashNd.value, "false");
+  check("动作层：not-docs 以 / 结尾要出声", /::warning::/.test(slashNd.stdout), true);
   /* 空串不该拼出 `--not-docs=`（虽然那样 node 也当没传）：走 `-n` 的那一支 */
   check("动作层：not-docs 为空等于没传", ndAct({ base: pFrom, head: pTo, notDocs: "" }).value, "true");
 }

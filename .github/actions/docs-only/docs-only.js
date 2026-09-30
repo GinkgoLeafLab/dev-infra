@@ -107,8 +107,11 @@ function isDocFile(f, notDocs) {
 //
 // **拿不准就抛，由 main 按「跑测试」处理：** 宁可整个参数作废，也不留一条
 // 「写了却永远命不中」的规则——那会让本该被拦下的路径悄悄落回「文档」那一档。
-// 会抛的写法：`**` 不是「一段的开头、后面紧跟 /」的形状（`docs/**`、`a**b`、`***/x`），
-// 以及以 `/` 或 `./` 开头（git 给的路径没有那个前缀，永远命不中）。
+// 会抛的写法（每一种都是「写了却永远命不中」）：
+// - 按 `/` 切开之后有一段是空的或是 `.` / `..`：开头的 `/`、结尾的 `/`（`src/modules/`、
+//   `**/`）、中间的 `//`、`./x`、`a/./b`、`a/../b`。git 给的路径是规范化的文件路径，
+//   不会有这几种段，也不会以 `/` 结尾（模式匹配的是文件，不是目录）
+// - `**` 不是「一段的开头、后面紧跟 /」的形状（`docs/**`、`a**b`、`***/x`）
 // 传进来不是字符串同样抛。空原文（或全是空行）返回空数组，等价于没传。
 function parseNotDocs(raw) {
   if (raw === undefined || raw === null) return [];
@@ -117,8 +120,13 @@ function parseNotDocs(raw) {
   for (const line of raw.split("\n")) {
     const pat = line.trim().normalize("NFC");
     if (pat === "") continue;
-    if (pat.startsWith("/") || pat.startsWith("./")) {
-      throw new Error(`not-docs 里的模式不许以 / 或 ./ 开头（git 路径没有那个前缀，永远命不中）：${pat}`);
+    // 逐段查，不只查开头：以 / 结尾的模式（`src/modules/`）和 `docs/**` 是同一种错——
+    // 想拦一整个目录，却写成了永远命不中的形状。模式匹配的是文件路径，
+    // 要拦目录下的文件就得写到文件名（例如 `src/modules/x/矩阵.md`）。
+    for (const seg of pat.split("/")) {
+      if (seg === "" || seg === "." || seg === "..") {
+        throw new Error(`not-docs 里的模式有空段或 . / .. 段（开头或结尾的 /、//、./、../ 都命不中任何文件路径）：${pat}`);
+      }
     }
     let src = "";
     for (let i = 0; i < pat.length; ) {
