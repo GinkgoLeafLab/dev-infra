@@ -1,6 +1,6 @@
 ---
 name: dev-infra
-description: 给一个仓库接上（或事后体检、升级）GinkgoLeafLab 的共享开发基础设施——dev-infra 的可复用工作流与组合动作、分支守卫与 git 钩子，以及 dev-agents 的 agent 角色定义。涉及"接入共享基础设施""新仓库要装门禁""装分支守卫""review / qa 检查不生效""升级 uses 版本号""移子模块指针""agent 角色定义从哪来"时用它。
+description: 给一个仓库接上（或事后体检、升级）GinkgoLeafLab 的共享开发基础设施——dev-infra 的可复用工作流与组合动作、分支守卫与 git 钩子，以及 dev-agents 的 agent 角色定义。涉及"接入共享基础设施""新仓库要装门禁""装分支守卫""review / qa 检查不生效""合并时自动打 tag""升级 uses 版本号""移子模块指针""agent 角色定义从哪来"时用它。
 ---
 
 # 接共享开发基础设施
@@ -17,7 +17,7 @@ git switch -c chore/接入共享基础设施          # 必须在特性分支上
 
 # 全新仓库：先把脚本弄到盘上（它自己会把子模块挂好、钉在最新 tag 上）
 git clone --depth 1 https://github.com/GinkgoLeafLab/dev-infra /tmp/dev-infra
-node /tmp/dev-infra/adopt/adopt.js            # 要装 QA 门禁就加 --qa
+node /tmp/dev-infra/adopt/adopt.js            # 要装 QA 门禁就加 --qa；要合并时自动打 tag 就加 --tag-on-merge
 
 # 已经接过的仓库（体检 / 补齐 / 升级）：用自己那份，它就在子模块里
 node vendor/dev-infra/adopt/adopt.js --check  # 只体检，一个字节都不写
@@ -40,7 +40,7 @@ node vendor/dev-infra/adopt/adopt.js --check  # 只体检，一个字节都不�
 
 | 层 | 装什么 | 怎么进来 | 谁能动 |
 |---|---|---|---|
-| 第一层 | `review-gate` / `qa-gate` / `labels-sync` 三份 caller，`docs-only` 那个步骤 | 各 workflow 里一行 `uses: …@vX.Y.Z` | 脚本写，人评审 |
+| 第一层 | `review-gate` / `labels-sync` 两份 caller，要的话再加 `qa-gate`（`--qa`）/ `tag-on-merge`（`--tag-on-merge`），`docs-only` 那个步骤 | 各 workflow 里一行 `uses: …@vX.Y.Z` | 脚本写，人评审 |
 | 第二层 | 分支守卫、git 钩子、`setup-hooks.js`（submodule）+ agent 角色定义（subtree） | `vendor/dev-infra` 挂 submodule；`.claude/agents/common` 走 subtree | 脚本写，人评审 |
 | **第三层** | **仓库设置**：ruleset、必需检查、Environment 凭据 | **人去网页上点** | **agent 改不了，脚本也不会假装它做了** |
 
@@ -59,9 +59,19 @@ commit status 只是「看得见」，不是「拦得住」。脚本最后那张
 | **caller 少了 `synchronize` / 少半个 `if`** | 那条路永远不跑，而且不报错。按脚本重写那份 caller（`--force`），或照它说的补 |
 | **钉到 `@main` / `@v1`** | 等于上游一次未经本仓评审的改动当场在这里生效。钉三段式 tag |
 | **`qa-labels` 和有没有 qa-gate 对不上** | 给了 `true` 却没 qa-gate = 建两个没人读的标签；有 qa-gate 却没给 = 那两个标签在本仓根本不存在，而 GitHub 对打一个不存在的标签是**静默不打**，QA 那条路从此形同虚设 |
+| **`release-labels` 和有没有 tag-on-merge 对不上** | 装了 tag-on-merge 却没给 `release-labels: true` = `release/major` / `release/patch` / `release/skip` 在本仓根本不存在，PR 上挂不上，**每一次都静默按默认 minor 打**；没装却给了 = 建三个没人读的标签。没装的仓里**那一行整行不写**，不是写成 `false` |
+| **tag-on-merge 没把 dry-run 按 `== true` 传下去** | 手动触发时勾了 dry-run，它照样真的建 tag——一个收不回来的版本号。照模板写 `dry-run: ${{ inputs.dry-run == true }}` |
+| **tag-on-merge 不是 push 到 main / 加了 paths / 少了只认 main 的 if** | 合并后不跑、按路径漏打、或者手动触发选了别的分支也去建 tag。照模板重写（`--force`） |
 | **`scripts.prepare` 已经是别的内容** | 脚本不覆盖别人的 prepare。自己把 `git submodule update --init --recursive && node vendor/dev-infra/shared/setup-hooks.js` 接进去 |
 | **`npm test` 里没有 test:guard** | 守卫那一百多条断言在本仓一次都不会跑。怎么挂逐仓不同（有的是 `test-all.js` 的清单，有的是一串 `&&`），所以脚本只报告 |
 | **agent 定义和上游对不上** | 要么有人在本仓改了那几份（改了也传不出去，下次重接原样覆盖），要么 `.claude/agents-common.VERSION` 记的 tag 是假的。别在本仓改那几份，去 `dev-agents` 改 |
+
+## 装了 tag-on-merge 之后，PR 怎么标版本
+
+合并进 main 之后它自动打下一个 tag：**不挂标签就升 minor**；breaking change 挂
+`release/major`，很小的改动（修 bug、措辞）挂 `release/patch`，不值得单独发版挂
+`release/skip`——**恰好一个**，挂两个它会判矛盾、那一版不打。它红了就是「这一版没 tag」，
+去 Actions 看它说了什么；正文与失败对照表在 dev-infra README 的「合并时自动打 tag」。
 
 ## 开 PR 的时候
 
@@ -96,4 +106,9 @@ commit status 只是「看得见」，不是「拦得住」。脚本最后那张
 | 第二层 subtree | `node vendor/dev-infra/adopt/adopt.js --force --agents-tag <新 tag>`（它替你跑那三步；**不要用 `git subtree pull`**：squash 合并会把 subtree 认路用的那两行尾注一起吞掉） |
 
 上游 dev-infra 自己怎么改、tag 怎么打，见那个仓库的 README「改这里的东西之后」。
-**打 tag 是人做的**，agent 在会话环境里会拿到 403。
+**dev-infra 接上 `self-tag-on-merge.yml` 之后，tag 在合并后由 `tag-on-merge` 自动打；
+接上之前仍是人手打**（agent 手打拿 403）。所以升 `uses:` / 移指针之前，
+**先确认你要的那个 tag 真的在上游存在**
+（`git ls-remote --tags https://github.com/GinkgoLeafLab/dev-infra`）——不在有两种可能：
+上游还在人手打的阶段、这一版还没人打（去找人），或者上游已经自动打、那一次运行红了
+（去 dev-infra 的 Actions 看 tag-on-merge 说了什么）。

@@ -28,6 +28,7 @@ function check(cond, msg) {
 
 const REPO = "GinkgoLeafLab/does-not-matter";
 const QA_MANIFEST = path.join(__dirname, "labels.qa.json");
+const RELEASE_MANIFEST = path.join(__dirname, "labels.release.json");
 
 /** 起一个假 API。handler 拿到 (req, body) 返回 [状态码, 响应体字符串]。 */
 function fakeApi(handler) {
@@ -82,6 +83,9 @@ async function main() {
        建到一个没有 qa-gate 的仓里，等于给两个没有任何东西在读的标签一份正式定义。 */
     check(!names.has("qa-required") && !names.has("qa-passed"),
       "qa-* 不许进基础清单——它们只属于真的装了 qa-gate 的仓，见 labels.qa.json");
+    /* release/* 同理：读它们的是合并时自动打 tag 的那条流水线，没装它的仓不该有。 */
+    check(![...names].some(n => n.toLowerCase().startsWith("release/")),
+      "release/* 不许进基础清单——它们只属于装了自动打 tag 那条流水线的仓，见 labels.release.json");
   }
 
   /* ---------- 1b. qa 清单和 qa-gate 的常量对得上 ---------- */
@@ -96,6 +100,22 @@ async function main() {
     check(qa.length === 2, `qa 清单恰好两条，实际 ${qa.length}`);
     check(names.has(REQUIRED_LABEL), `qa 清单里缺 ${REQUIRED_LABEL}（qa-gate.js 认的就是这个名字）`);
     check(names.has(PASSED_LABEL), `qa 清单里缺 ${PASSED_LABEL}（qa-gate.js 认的就是这个名字）`);
+  }
+
+  /* ---------- 1c. release 清单和打 tag 那份脚本的常量对得上 ---------- */
+  /* 和 1b 同一个形状。读这三个标签的是同级的组合动作 tag-on-merge 里那份脚本，
+     它按名字认——清单里写成 `release/Major` 之外的任何拼写差异都会让那个 PR
+     **静默地按默认 minor 打**（GitHub 对打一个不存在的标签是静默不打，
+     作者以为挂上了、其实没挂上）。所以名字必须一个字符都不差，两边只许一处真相。 */
+  {
+    const rel = readManifest(RELEASE_MANIFEST);
+    const { RELEASE_LABELS } = require("../tag-on-merge/tag-on-merge.js");
+    const want = Object.values(RELEASE_LABELS).sort();
+    const got = rel.map(l => l.name).sort();
+    check(JSON.stringify(got) === JSON.stringify(want),
+      `release 清单必须恰好是 tag-on-merge.js 认的那几个：期望 ${want.join("、")}，实际 ${got.join("、")}`);
+    const qaNames = readManifest(QA_MANIFEST).map(l => l.name);
+    check(!qaNames.some(n => n.toLowerCase().startsWith("release/")), "qa 清单里不许混进 release/*");
   }
 
   /* ---------- 2. 形状校验抓得到那几类错 ---------- */
@@ -290,6 +310,11 @@ async function main() {
     const names = new Set(both.map(l => l.name));
     check(names.has("bug") && names.has("qa-required"), "拼完两边的标签都要在");
 
+    /* 三份一起拼（一个同时装了 qa-gate 和自动打 tag 的仓就是这样），也不许撞名。 */
+    let threw3 = false;
+    try { readManifests([BASE_MANIFEST, QA_MANIFEST, RELEASE_MANIFEST]); } catch (e) { threw3 = true; }
+    check(!threw3, "基础 + qa + release 三份拼在一起必须合法（没有跨文件重名）");
+
     /* **跨文件重名要红。** 这是这个机制唯一会静默出错的地方：两份清单撞了同一个
        标签名，后来者悄悄覆盖前者、而两份都「各自合法」。靠的是「拼完再整体校验」，
        变异落点：把 readManifests 改成逐份 validateManifest，这条当场绿→红反过来。 */
@@ -359,6 +384,23 @@ async function main() {
     check(/\$\{\{ github\.action_path \}\}\/labels\.json/.test(act),
       "L7 **清单也要走 action_path**——写成工作区相对路径会指到 caller 那个没 checkout 过的空目录");
     check(/^\s*using: composite\s*$/m.test(act), "L8 组合动作确实是 composite");
+
+    /* L11：每一组可选清单都是「一个 input → 一行 env → 一份走 action_path 的清单 →
+       一条 --manifest」，而可复用工作流那边要**声明**它、并且在两步里都**原样往下传**。
+       漏了任何一环都不报错：工作流不传，组合动作拿到默认的 "false"，那组标签安静地
+       从来没建过；dry-run 那步传了、同步那步没传，计划里有、实际没有。 */
+    for (const [input, env, file] of [["qa-labels", "QA", "labels.qa.json"],
+                                      ["release-labels", "RELEASE", "labels.release.json"]]) {
+      const esc = input.replace(/-/g, "\\-");
+      check(new RegExp("^  " + esc + ":\\s*$", "m").test(act), `L11 action.yml 声明了 input ${input}`);
+      check(act.includes(`${env}: \${{ inputs.${input} }}`), `L11 action.yml 把 ${input} 放进 env ${env}`);
+      check(act.includes(`\${{ github.action_path }}/${file}`), `L11 ${file} 走 action_path`);
+      check(new RegExp('\\[ "\\$' + env + '" = "true" \\] && args\\+=\\(--manifest "\\$' + env + '_MANIFEST"\\)').test(act),
+        `L11 ${env}=true 时真的多一条 --manifest`);
+      check(new RegExp("^      " + esc + ":\\s*$", "m").test(wf), `L11 可复用工作流声明了 input ${input}`);
+      const passes = wf.split(`${input}: \${{ inputs.${input} }}`).length - 1;
+      check(passes === 2, `L11 可复用工作流在 dry-run 和同步两步里都传了 ${input}（实际 ${passes} 处）`);
+    }
 
   /* 清单里「不许出现表达式」的那几个字段，**按键路径切，不按字节位置切**。
 

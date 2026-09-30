@@ -39,6 +39,14 @@ on:
         required: false
         type: boolean
         default: false
+      release-labels:
+        description: >-
+          这个仓要不要 release/major / release/patch / release/skip。
+          **只有装了 tag-on-merge（合并时自动打 tag）的仓才给 true**，
+          理由见组合动作的 action.yml。
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   sync:
@@ -63,6 +71,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           repository: ${{ github.repository }}
           qa-labels: ${{ inputs.qa-labels }}
+          release-labels: ${{ inputs.release-labels }}
           apply: "false"
 
       - name: 同步
@@ -71,4 +80,5 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           repository: ${{ github.repository }}
           qa-labels: ${{ inputs.qa-labels }}
+          release-labels: ${{ inputs.release-labels }}
           apply: "true"

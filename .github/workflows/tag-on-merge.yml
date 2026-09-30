@@ -1,0 +1,65 @@
+name: tag-on-merge (reusable)
+
+# PR 合进 main 之后，在调用方仓库 main 的 tip 上自动打下一个 vX.Y.Z tag。
+# 各仓库只留一个二十来行的 caller，逻辑只有这一份。
+#
+# **逻辑不在这儿**，在 .github/actions/tag-on-merge/tag-on-merge.js（版本号怎么定、
+# 为什么打在 tip、什么时候宁可不打，理由逐条写在那份文件顶部），由同目录的
+# tag-on-merge.test.js 钉着。一句话版本：
+#
+# - 默认 minor（dev-infra 十八个、dev-agents 四个、dev-standards 一个手打的 tag 全是
+#   minor）；PR 上挂 `release/major` / `release/patch` / `release/skip` 覆盖
+# - 看的是「上一个 tag 到 main 的 tip」之间合进来的**所有** PR，取最高的那一级
+# - 打在**运行那一刻 main 的 tip** 上——`GITHUB_TOKEN` 给非 tip 的 commit 建 tag，
+#   碰上之后改过 workflow 的会被拒
+# - **只建不改**：tag 已存在就红，绝不覆盖、绝不移动
+#
+# ---------------------------------------------------------------------------
+# caller 必须自己提供这几样（模板在 adopt/templates/tag-on-merge.yml，
+# 形状由 adopt.js 的 lintCaller('tag-on-merge') 体检）
+# ---------------------------------------------------------------------------
+#
+# 1. `on: push: branches: [main]`（**不许加 paths**：要不要打由标签说了算）+
+#    `workflow_dispatch`（修好标签之后补打）。可复用工作流没有自己的触发器。
+# 2. `permissions: { contents: write, pull-requests: read }` 写在**调用这份文件的
+#    那个 job 上**——官方明写权限取自 calling job，被调用方只能降不能升。
+#    **这是四份共享 caller 里唯一一份要 `contents` 的**：它要 checkout 调用方仓库、
+#    还要往里建 tag。
+# 3. job 级 `if: github.ref == 'refs/heads/main'`：手动触发时可以选别的分支，
+#    那样跑的是那个分支上的 caller。
+# 4. `concurrency: { group: tag-on-merge, cancel-in-progress: false }`：两次同时算
+#    会对同一个「下一个版本号」各建一次。**别在这份文件里再写一个同名的组**——
+#    caller 和被调用方撞同一个并发组，GitHub 会在启动时判成死锁、直接取消整次运行
+#    （caller 占着那个组，被调用的一方永远等不到它）。
+
+on:
+  workflow_call:
+    inputs:
+      dry-run:
+        description: 只算不打：打印会打哪个 tag、依据是哪几个 PR
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # permissions 不写在这儿，见上面第 2 条。
+    steps:
+      # fetch-depth: 0 是前提：要从上一个 tag 数到 tip，浅克隆里那段历史和 tag 都不在。
+      # 这里 checkout 的是**调用方仓库**（github.repository 是 caller 的）。
+      # 脚本自己还会再 fetch 一次 main 和 tags，拿的是运行那一刻的 tip。
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # 同仓自引用用 `$/`：解析到「这份文件所在的仓库，运行时那个 commit」，
+      # 和 qa-gate / labels-sync 同一个理由（不看任何 tag，没有前向引用）。
+      # **不能带 `@{ref}`，也不能写成 `./`**——`./` 对着工作区解析，而工作区里
+      # 此刻是调用方仓库，那里没有这个动作。tag-on-merge.test.js 钉着这一行。
+      - name: 打 tag
+        uses: $/.github/actions/tag-on-merge
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          dry-run: ${{ inputs.dry-run }}

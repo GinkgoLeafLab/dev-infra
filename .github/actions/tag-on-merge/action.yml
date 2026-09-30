@@ -1,0 +1,46 @@
+name: tag-on-merge
+description: 在调用方仓库 main 的 tip 上打下一个 vX.Y.Z tag。只建不改，判不了就不打
+
+# 判定与建 tag 全在同目录的 tag-on-merge.js（版本号怎么定、为什么打在 tip、什么时候
+# 宁可不打，理由逐条写在那份文件顶部），由同目录的 tag-on-merge.test.js 钉着。
+# 这个动作只负责把它和调用方的环境接上。
+#
+# **它要调用方的工作区里有一份完整的 checkout**（`fetch-depth: 0`）：要从上一个 tag
+# 数到 tip，浅克隆里那段历史和 tag 都不在。checkout 由 `.github/workflows/tag-on-merge.yml`
+# 那一步做——**这是这个仓库里唯一一条要 checkout 调用方仓库的共享流水线**
+# （qa-gate / labels-sync 一次都不做），因为它要读的是调用方仓库自己的 git 历史，
+# 那东西不可能跟着动作下发。
+#
+# 脚本本身跟着动作下发（`$GITHUB_ACTION_PATH`），**不在调用方的工作区里**：
+# 各仓不需要、也不该有一份 tag-on-merge.js 的副本。
+#
+# 这一段（`runs:` 之前）**不许出现 `${…}` 形式的表达式**：runner 在这几个字段里没有
+# github 上下文，写了会让所有调用方一起红（labels.test.js 的 L10 讲的是同一件事）。
+
+inputs:
+  token:
+    description: 调用方 job 的 GITHUB_TOKEN（contents 写、pull-requests 读）。组合动作读不到 secrets 上下文，只能走 input
+    required: true
+  dry-run:
+    description: "true 只算不建：打印会打哪个 tag、依据是哪几个 PR"
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    # 这里的 github.* 与环境变量里的 GITHUB_REPOSITORY 都是**调用方那次事件**的：
+    # 官方原话 "When a reusable workflow is triggered by a caller workflow, the `github`
+    # context is always associated with the caller workflow."——所以建的是调用方仓库的
+    # tag，不是 dev-infra 的。
+    #
+    # 参数拼在 shell 里而不是插进 run 的文本：inputs 是调用方给的字符串，
+    # 插进命令行就是注入口子。这个仓库其余每一处都这么写。
+    - shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        DRY_RUN: ${{ inputs.dry-run }}
+      run: |
+        args=()
+        [ "$DRY_RUN" = "true" ] && args+=(--dry-run)
+        node "$GITHUB_ACTION_PATH/tag-on-merge.js" "${args[@]}"

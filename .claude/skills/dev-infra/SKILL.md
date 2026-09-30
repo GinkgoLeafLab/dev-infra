@@ -1,14 +1,18 @@
 ---
 name: dev-infra
-description: 这个仓库（GinkgoLeafLab/dev-infra）自己和共享开发基础设施之间的接线——它既是那套东西的上游，也是它自己的消费者，两侧的规矩不一样。涉及"改这里之后怎么打 tag""本仓自己那一侧的门禁/守卫""adopt 脚本为什么在这儿拒绝跑""agent 角色定义从哪来"时用它。
+description: 这个仓库（GinkgoLeafLab/dev-infra）自己和共享开发基础设施之间的接线——它既是那套东西的上游，也是它自己的消费者，两侧的规矩不一样。涉及"改这里之后怎么打 tag""自动打 tag 红了""release/major 标签""本仓自己那一侧的门禁/守卫""adopt 脚本为什么在这儿拒绝跑""agent 角色定义从哪来"时用它。
 ---
 
 # 共享基础设施：这个仓库两侧的规矩
 
 **这个仓库是上游本身**，所以它有别的仓没有的两条：
 
-1. **改了这里的东西，tag 是人打的、而且永远是打一个新的**（agent 在会话环境里拿 403）。
-   顺序永远是**先打 tag，再合各仓的 caller**——反了的话那些 caller 指向一个不存在的
+1. **改了这里的东西，tag 永远是打一个新的、不移动。** 打 tag 这件事已经抽成共享的
+   `tag-on-merge`（默认 minor；breaking change 给 PR 挂 `release/major`、很小的改动挂
+   `release/patch`、不值得发版挂 `release/skip`，恰好一个），**但本仓自己还没接上它**：
+   本仓 caller 按 tag 钉自己，第一个带它的 tag 要人手打（agent 拿 403），之后一个 PR 加上
+   `self-tag-on-merge.yml`，从那以后才自动——步骤见 README「本仓自己什么时候开始自动打」。
+   顺序永远是**先有 tag，再合各仓的 caller**——反了的话那些 caller 指向一个不存在的
    版本，而 `pull_request_target` 取默认分支的定义，之后每个 PR 都撞同一件事，
    包括来修它的那个。正文见本仓 README「改这里的东西之后」。
 2. **本仓自己作为消费者的那一侧形状和别的仓不一样**（caller 叫 `self-*.yml`、

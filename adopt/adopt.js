@@ -80,6 +80,8 @@ const USAGE = `用法：node ${SUBMODULE_PATH}/adopt/adopt.js [选项]
 
   --check              只体检、不写任何东西（受保护分支上也能跑）
   --qa                 同时装 qa-gate caller，并把 labels-sync 的 qa-labels 置 true
+  --tag-on-merge       同时装 tag-on-merge caller（合并进 main 后自动打 vX.Y.Z），
+                       并让 labels-sync 传 release-labels: true
   --no-agents          不接 ${AGENTS_PREFIX}（subtree 那条路）
   --no-skill           不在本仓装那份指向上游的 skill 存根
   --force              已存在且内容不同的文件也覆盖（默认只报告）
@@ -95,7 +97,7 @@ const USAGE = `用法：node ${SUBMODULE_PATH}/adopt/adopt.js [选项]
 退出码：0 = 一条 ❌ 都没有；1 = 有 ❌（**判不了也算 ❌**，见文件头「失败方向」）。`;
 
 const BOOL_FLAGS = {
-  "--check": "check", "--qa": "qa", "--no-agents": "noAgents",
+  "--check": "check", "--qa": "qa", "--tag-on-merge": "tagOnMerge", "--no-agents": "noAgents",
   "--no-skill": "noSkill", "--force": "force", "--offline": "offline",
   "--help": "help",
 };
@@ -106,7 +108,7 @@ const VALUE_FLAGS = {
 
 function parseArgs(argv) {
   const o = {
-    check: false, qa: false, noAgents: false, noSkill: false, force: false,
+    check: false, qa: false, tagOnMerge: false, noAgents: false, noSkill: false, force: false,
     offline: false, help: false, infraTag: null, agentsTag: null, repo: null,
     infraUrl: INFRA_URL_DEFAULT, agentsUrl: AGENTS_URL_DEFAULT,
   };
@@ -203,8 +205,12 @@ function assertPinned(text, where) {
   return refs;
 }
 
-function renderCaller(tpl, { tag, qa }) {
-  const out = tpl.replace(/__INFRA_TAG__/g, tag).replace(/__QA_LABELS__/g, qa ? "true" : "false");
+/* `release` 为假时**整行删掉** `release-labels:`，而不是写成 false：那个 input 是
+   后来才加的，钉在更早的 tag 上的 caller 传一个被调用方没声明的 input，GitHub 会当场
+   拒绝整条流水线（"Invalid input"）。没装 tag-on-merge 的仓不该为它冒这个险。 */
+function renderCaller(tpl, { tag, qa, release = false }) {
+  const out = tpl.replace(/__INFRA_TAG__/g, tag).replace(/__QA_LABELS__/g, qa ? "true" : "false")
+    .replace(/^.*__RELEASE_LABELS__.*\n/gm, (line) => (release ? line.replace("__RELEASE_LABELS__", "true") : ""));
   assertPinned(out, "渲染出的 caller");
   return out;
 }
@@ -221,7 +227,7 @@ function renderShim(tpl, parts = GUARD_REL) {
 /* caller 的体检。**查的全是「漏了不报错、只是那条路安静地不存在」的东西**：
    少一个事件、少半个 if、少一个权限、钉到会动的名字。查不出本仓自己加的东西，
    那不是这儿的事。 */
-function lintCaller(kind, text, { qa } = {}) {
+function lintCaller(kind, text, { qa, release } = {}) {
   const bad = [];
   /* **先把整行注释剥掉再判**：这些模板的注释里逐字写着 `review-passed`、`synchronize`、
      `@main` 这些词（它们正是在解释那几条），照着原文判会把「注释里提过」当成
@@ -229,7 +235,7 @@ function lintCaller(kind, text, { qa } = {}) {
   const code = text.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
   const has = (re) => re.test(code);
   if (!has(/^on:/m)) bad.push("没有 on: 触发器");
-  else if (kind !== "labels-sync" && !has(/^\s*pull_request_target:/m)) {
+  else if ((kind === "review-gate" || kind === "qa-gate") && !has(/^\s*pull_request_target:/m)) {
     bad.push("不是 pull_request_target：定义取自默认分支这条安全地基没了，PR 能改本文件放行自己");
   }
   if (kind === "review-gate") {
@@ -251,6 +257,25 @@ function lintCaller(kind, text, { qa } = {}) {
     if (!has(/pull-requests:\s*write/)) bad.push("少了 pull-requests: write");
     if (has(/^\s*paths(-ignore)?:/m)) bad.push("有 paths / paths-ignore：必需检查被 workflow 级过滤跳过就永远 pending");
   }
+  if (kind === "tag-on-merge") {
+    /* 它是四份里唯一一份 **push 触发**、唯一一份要 `contents` 的：跑在合并之后，
+       代码已经在 main 上被评审过；要 checkout 本仓读 git 历史，还要往本仓建 tag。 */
+    if (!has(/^\s*push:\s*\n\s+branches:\s*\[\s*main\s*\]/m)) bad.push("不是 push 到 main 触发：合并之后它根本不跑");
+    if (has(/^\s*pull_request(_target)?:/m)) bad.push("挂在 PR 事件上：它要在合并之后、对着 main 的 tip 跑");
+    if (has(/^\s*paths(-ignore)?:/m)) bad.push("有 paths / paths-ignore：要不要打由 PR 上的标签说了算，按路径跳过就是漏打");
+    if (!has(/^\s*workflow_dispatch:/m)) bad.push("没有 workflow_dispatch：修好标签之后没法补打");
+    if (!has(/^\s*dry-run:\s*\$\{\{\s*inputs\.dry-run == true\s*\}\}\s*$/m)) {
+      bad.push("没把 dry-run 按 `${{ inputs.dry-run == true }}` 传下去：手动触发勾了 dry-run，它照样真的建 tag——一个收不回来的版本号");
+    }
+    if (!has(/if:\s*github\.ref == 'refs\/heads\/main'/)) bad.push("job 级 if 里没有只认 main 那一条：手动触发选了别的分支也会去建 tag");
+    if (!has(/contents:\s*write/)) bad.push("少了 contents: write：建不了 tag（也 checkout 不了本仓）");
+    if (!has(/pull-requests:\s*read/)) bad.push("少了 pull-requests: read：查不到每个 commit 是哪个 PR 合进来的、挂了什么标签");
+    if (has(/(statuses|issues):\s*write/) || has(/pull-requests:\s*write/)) bad.push("抄了隔壁的写权限：这条流水线只建 tag，不写检查、不改标签");
+    if (!has(/^concurrency:\s*\n\s+group:\s*\S+\s*\n\s+cancel-in-progress:\s*false\s*$/m)) {
+      bad.push("没有 cancel-in-progress: false 的并发组：两次同时算会对同一个版本号各建一次");
+    }
+    if (!has(/uses:\s*GinkgoLeafLab\/dev-infra\/\.github\/workflows\/tag-on-merge\.yml@/)) bad.push("uses: 指的不是 dev-infra 的 tag-on-merge.yml");
+  }
   if (kind === "labels-sync") {
     if (!has(/issues:\s*write/)) bad.push("少了 issues: write（标签归在 issues 这个 scope 下）");
     if (has(/statuses:\s*write/)) bad.push("抄了隔壁的 statuses: write，这条流水线不需要");
@@ -269,8 +294,18 @@ function lintCaller(kind, text, { qa } = {}) {
         ? "装了 qa-gate 却没传 qa-labels: true：qa-required / qa-passed 这两个标签在本仓根本不存在，而 GitHub 对打一个不存在的标签是**静默不打**"
         : "传了 qa-labels: true 但本仓没有 qa-gate：等于建两个没有任何东西在读的标签");
     }
+    /* release-labels 同一个形状，同样**不给就抛**。和 qa-labels 只差一处：**这一行可以
+       不在**（没装 tag-on-merge 的仓就不该有它，见 renderCaller），所以只判「是不是 true」。 */
+    if (release === undefined) {
+      throw new Error("lintCaller('labels-sync') 必须告诉它本仓装没装 tag-on-merge（{ release: true|false }）");
+    }
+    if (has(/release-labels:\s*true/) !== !!release) {
+      bad.push(release
+        ? "装了 tag-on-merge 却没传 release-labels: true：release/major / release/patch / release/skip 在本仓根本不存在，挂不上——**每一次都静默按默认 minor 打**"
+        : "传了 release-labels: true 但本仓没有 tag-on-merge：等于建三个没有任何东西在读的标签");
+    }
   }
-  if (kind !== "labels-sync" && has(/contents:\s*read/)) {
+  if ((kind === "review-gate" || kind === "qa-gate") && has(/contents:\s*read/)) {
     bad.push("有 contents: read：这条路上一次 checkout 都不做，给了它说明接线理解错了");
   }
   let refs = [];

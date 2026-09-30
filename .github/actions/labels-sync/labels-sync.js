@@ -56,7 +56,8 @@ const path = require("path");
    为什么连清单也共享：标签的抽象意义各仓相同，描述的措辞差异只是细节，
    而「同一个标签三个仓三种颜色」（`review-passed` 实测就是）纯粹是漂移。
 
-   **可选的那几组单独成文件**（今天只有 `labels.qa.json`）：`qa-required` /
+   **可选的那几组单独成文件**（今天是 `labels.qa.json` 与 `labels.release.json`，
+   后者给合并时自动打 tag 的那条流水线，道理相同）：`qa-required` /
    `qa-passed` 只该出现在真的有 qa-gate 的仓里。这不是措辞差异，是能力差异——
    把它们写进一个没有 QA 的仓，就等于给它们一份正式定义，而没有任何东西在读它们
    （GinkgoLeafLab/GTO-Trainer-engine 的 CLAUDE.md 有一整节写这件事）。
