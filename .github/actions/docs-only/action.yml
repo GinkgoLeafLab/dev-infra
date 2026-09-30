@@ -42,6 +42,19 @@ inputs:
       **判定逻辑不受它影响**。不传就是默认的「npm test」。
     required: false
     default: ""
+  not-docs:
+    description: >-
+      换行分隔的 glob 列表，声明「这些路径**不算文档**」：命中的文件一律判成非文档，
+      **先于** docs/ 与 .md 两条规则（所以 docs/ 下、.md 结尾的路径也能被它拦下）。
+      用途是调用方仓里有些 .md 或 docs/ 下的文件其实是测试的输入（矩阵、夹具之类）。
+      语法只有 `**/`（零个或多个目录段）与 `*`（不跨 /），其余字符原样匹配；
+      空行与首尾空白忽略。**写法不认识时整个参数按解析失败处理：打 ::warning:: 并输出
+      docs_only=false，也就是照常跑测试。**不认识的是「写了却永远命不中」的几种：
+      `**` 不成 `**/`（如 docs/**），以及按 / 切开后有空段或 . / .. 段（开头或结尾的 /，
+      如 src/modules/ 与 **/；//；./x；a/./b；a/../b）——模式匹配的是文件路径，不是目录。
+      不传就是老行为。
+    required: false
+    default: ""
 
 outputs:
   # 名字是下划线，和上面几个 input 不一样：这个串是 docs-only.js 自己写进
@@ -54,8 +67,9 @@ outputs:
 runs:
   using: composite
   steps:
-    # 四个值全部走环境变量进 node，**一个都不拼进 shell**：SHA 来自事件 payload、
-    # skipped 是人随手填的中文文本，拼进命令行就是注入口子，而且中文与空格会被词分割。
+    # 五个值全部走环境变量进 node，**一个都不拼进 shell**：SHA 来自事件 payload、
+    # skipped 与 not-docs 是人随手填的文本（中文、空格、not-docs 还带换行与 `*`），
+    # 拼进命令行就是注入口子，而且会被词分割与路径展开。
     #
     # node 用 runner 自带的：这个脚本零依赖、只用 fs / child_process。
     # 不加 setup-node 是刻意的——加了就要求每个消费仓的 job 多跑一步，
@@ -70,8 +84,11 @@ runs:
         DOCS_ONLY_HEAD: ${{ inputs.head }}
         DOCS_ONLY_MERGE_BASE: ${{ inputs.merge-base }}
         DOCS_ONLY_SKIPPED: ${{ inputs.skipped }}
+        DOCS_ONLY_NOT_DOCS: ${{ inputs.not-docs }}
       # 用数组拼参数、不用字符串：`--skipped=npm test 与内测部署` 里有空格，
       # 拼成字符串再展开会被切成三个参数，判定当场看不见 --skipped。
+      # `--not-docs=` 那一个更要紧：值里有换行，词分割会把第二行起的模式全丢掉——
+      # 判定不报错，只是那几条规则没了，该被拦下的路径落回「文档」。
       run: |
         args=("$DOCS_ONLY_BASE" "$DOCS_ONLY_HEAD")
         if [ "$DOCS_ONLY_MERGE_BASE" = "true" ]; then
@@ -79,5 +96,8 @@ runs:
         fi
         if [ -n "$DOCS_ONLY_SKIPPED" ]; then
           args+=("--skipped=$DOCS_ONLY_SKIPPED")
+        fi
+        if [ -n "$DOCS_ONLY_NOT_DOCS" ]; then
+          args+=("--not-docs=$DOCS_ONLY_NOT_DOCS")
         fi
         node "$GITHUB_ACTION_PATH/docs-only.js" "${args[@]}"
