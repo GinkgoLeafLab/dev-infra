@@ -405,9 +405,9 @@ uses: GinkgoLeafLab/dev-infra/.github/workflows/review-gate.yml@main   # ❌
    没有第二个版本号要在 PR 里对齐（以前按 `@vX.Y.Z` 引用时，那一行写的就是
    「该打哪个 tag」的唯一真相；这一条随着换成 `$/` 一起作废，见上面「为什么有
    组合动作这一层」）。**要偏离默认的 minor，在这一步给 PR 挂标签**，见下面「合并时自动打 tag」
-2. **在合并后的 commit 上打一个新 tag。** 本仓接上 `self-tag-on-merge.yml` 之后这一步是
-   自动的——**去 Actions 里确认那一次运行是绿的、tag 真的出现了**。**接上之前（见下面
-   「本仓自己什么时候开始自动打」）这一步仍是人做的**（agent 在这个环境里打不了 tag，会拿到 403）
+2. **在合并后的 commit 上打一个新 tag。** 这一步由 `self-tag-on-merge.yml` 自动做——
+   **去 Actions 里确认那一次运行是绿的、tag 真的出现了**。它红了才回到人手打
+   （agent 在这个环境里打不了 tag，会拿到 403），见下面「它红了怎么办」
 3. 各仓库把自己 caller 里的 `uses:` 升到新版本，走各自的 PR 与评审
 
 **顺序反了会红一片**：消费仓的 caller 先合、tag 后打，那些 caller 指向一个不存在的
@@ -484,16 +484,16 @@ workflow**，逐条对过：
 | Dependabot | `directory: "/"` 只扫根下的 `/.github/workflows`，看不见它 |
 | **Renovate（如果哪个仓开了）** | **看得见**：它 github-actions 管理器的默认匹配是 `(^|/)\.github/workflows/…`，嵌套的也认，会提 PR 去升那份副本里的 `uses:`。合了就是本仓改了 subtree 的内容——`--check` 会报「agent 定义和上游对不上」，下次重接原样覆盖。开了 Renovate 的仓给它加 `ignorePaths: [".claude/agents/common/**"]` |
 
-### 本仓自己什么时候开始自动打
+### 本仓自己是怎么接上的（以及别的仓怎么接）
 
 本仓的 caller 一律按 tag 钉自己（下面「这个仓库自己也接着这套东西」），而**第一个带
 `tag-on-merge` 本体的 tag 要等把它加进来的那个 PR 合并之后才存在**——在那之前写
-`self-tag-on-merge.yml`，就是钉一个还不存在的版本（v1.1.0 就是这么发坏的）。所以：
+`self-tag-on-merge.yml`，就是钉一个还不存在的版本（v1.1.0 就是这么发坏的）。所以当时是：
 
-1. 加进 `tag-on-merge` 的那个 PR 合并后，**人手打最后一次 tag**（按默认规则就是 `v1.19.0`）
-2. 一个 PR 同时做三件事：加 `self-tag-on-merge.yml` 钉那个 tag、把 `self-labels-sync.yml`
-   升到那个 tag 并传 `release-labels: true`、把 `self-adopt.test.js` 里的 `WANT_TAG` 改成
-   `true` 并把它加进 `CALLERS`。**这个 PR 合并的那一刻，本仓第一次自动打 tag**
+1. 加进 `tag-on-merge` 的那个 PR（GinkgoLeafLab/dev-infra#43）合并后，**人手打了最后一次 tag**：`v1.19.0`
+2. 下一个 PR 同时做了三件事：加 `self-tag-on-merge.yml` 钉 `v1.19.0`、把 `self-labels-sync.yml`
+   升到 `v1.19.0` 并传 `release-labels: true`、把 `self-adopt.test.js` 里的 `WANT_TAG` 改成
+   `true` 并把它加进 `CALLERS`。**那个 PR 合并的那一刻，本仓第一次自动打 tag**，从此不再手打
 3. dev-agents、dev-standards 等要用的仓同样在那个 tag 存在之后再接，**两份 caller 一起接**：
    `tag-on-merge` + `labels-sync`（`release-labels: true`）——只接前者的话 `release/*`
    三个标签不存在，永远只升 minor。这两个仓不走完整的 adopt（没有门禁、没有 package.json），
@@ -622,7 +622,7 @@ package.json** 决定模块系统，往上找到的第一份会是消费仓自�
 |---|---|---|---|
 | review-gate caller | `.github/workflows/review-gate.yml` | `.github/workflows/self-review-gate.yml` | 同名会把**本体**盖掉 |
 | labels-sync caller | `.github/workflows/labels-sync.yml` | `.github/workflows/self-labels-sync.yml` | 同上。**它里面那条 `paths:` 也跟着改成了自己的路径**——文件名和那条 `paths:` 是同一处真相的两半，只改一半的表现是「升了版本号、这条流水线根本没触发」，绿的、Actions 里连一条失败记录都没有 |
-| tag-on-merge caller | `.github/workflows/tag-on-merge.yml`（装了才有） | `.github/workflows/self-tag-on-merge.yml`——**还没接**，等第一个带它的 tag，见「本仓自己什么时候开始自动打」 | 同名会把**本体**盖掉 |
+| tag-on-merge caller | `.github/workflows/tag-on-merge.yml`（装了才有） | `.github/workflows/self-tag-on-merge.yml`（比另外两份晚接一步，见「本仓自己是怎么接上的」） | 同名会把**本体**盖掉。**按 tag 钉的额外好处**：本仓打 tag 用的是上一个发布版的脚本，一个把打 tag 逻辑改坏了的 PR 不会用它自己那一版给本仓打出错的版本号 |
 | qa-gate caller | 装了 QA 门禁的仓才有 | **没装** | 本仓的改动由 `test.yml` 那一排自动测试覆盖，没有「要人手点一遍」的东西。所以 `qa-labels` 也必须是 `false`：给 `true` 等于建两个没有任何东西在读的标签 |
 | 第二层的判定逻辑 | submodule `vendor/dev-infra` | **树里的 `shared/`**，不挂子模块 | 挂一个指回自己的子模块，本仓的钩子跑的就是**钉在某个旧 tag 上的那一版守卫**，而不是工作区里正在改的这一版——守卫改坏了本仓自己反而感觉不到，那正是这套东西要消灭的静默失效 |
 | 守卫入口 | `scripts/guard-hook.js` 指进子模块 | 同一份模板，那行 `GUARD` 指 `../shared/guard-branch.js` | 逐字节等于 `renderShim(模板, SELF_GUARD_REL)`，由 `self-adopt.test.js` 钉着。**别手改它**，改模板再重新生成 |

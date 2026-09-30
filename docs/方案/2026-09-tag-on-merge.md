@@ -1,7 +1,7 @@
 # 合并时自动打 tag（tag-on-merge）
 
 - **日期**：2026-09
-- **状态**：实现中（本 PR）
+- **状态**：已落地——本体 GinkgoLeafLab/dev-infra#43（随 `v1.19.0` 发布，那是最后一个手打的 tag）；本仓接上 `self-tag-on-merge.yml` 在紧接着的那个 PR
 - **触发**：dev-infra 每次合并之后都要人手打一个新 tag，agent 在会话环境里打 tag 拿 403；
   dev-agents、dev-standards 是同一件事。这份方案是**补写的**——实现和它在同一个 PR 里，
   不是动手之前写的，这一点照实写在这里。
@@ -121,7 +121,7 @@ GitHub Actions 只认仓库根下的 `.github/workflows/`（<https://github.com/
 - **不在 PR 上做「你挂的标签对不对」的检查。** 默认值就是答案，不挂不算错
 - **不支持 main 以外的默认分支、不支持 `vX.Y.Z` 以外的 tag 形状。** 撞上会出声地判不了，不会猜
 - **本仓自己这一侧这次不接。** 本仓 caller 按 tag 钉自己，第一个带本体的 tag 要人手打，
-  之后一个 PR 加 `self-tag-on-merge.yml`（README「本仓自己什么时候开始自动打」）
+  之后一个 PR 加 `self-tag-on-merge.yml`（README「本仓自己是怎么接上的」）
 
 ### 已知边界（写下来，而不是让它静默）
 

@@ -33,26 +33,25 @@ function check(name, got, want) {
   else { fail++; console.error(`  ✗ ${name}：期望 ${JSON.stringify(want)}，实际 ${JSON.stringify(got)}`); }
 }
 
-/* 本仓这一侧的两份 caller。**装的是 review + labels-sync，没有 qa-gate**：
+/* 本仓这一侧的几份 caller。**装的是 review + labels-sync + tag-on-merge，没有 qa-gate**：
    本仓的改动由 test.yml 那一排自动测试覆盖，没有「要人手点一遍」的东西，
    所以不装 qa 门禁、labels-sync 的 `qa-labels` 也必须是 false——给了 true 等于在这个
    仓库里建两个没有任何东西在读的标签。这两半的一致性由 lintCaller 判（传 qa: false）。 */
 const WANT_QA = false;
 
-/* **tag-on-merge 本仓还没接，这是刻意的一步之差，不是漏了。** 本仓的 caller 一律按 tag
-   钉自己（README「这个仓库自己也接着这套东西」），而第一个带 tag-on-merge 本体的 tag
-   要等把它加进来的那个 PR 合并之后才存在——在那之前写 self-tag-on-merge.yml，就是
-   钉一个还不存在的版本（前向引用，v1.1.0 就是这么发坏的）。所以那一个 tag 由人手打，
-   接着一个 PR 同时做三件事：加 self-tag-on-merge.yml、把 self-labels-sync.yml 升到
-   那个 tag 并传 release-labels: true、把这里改成 true 并在 CALLERS 里加上它。
-   这一行的值要和 self-labels-sync.yml 里 release-labels 那一行一致，由 lintCaller 判。 */
-const WANT_TAG = false;
+/* **本仓也装了 tag-on-merge**（self-tag-on-merge.yml），所以 self-labels-sync 要传
+   release-labels: true——没传的话 release/* 三个标签在本仓不存在，PR 上挂不上，
+   每一次都静默按默认 minor 打。这两半的一致性由 lintCaller 判（传 release: true）。
+   它晚于另外两份接上是刻意的：本仓 caller 按 tag 钉自己，第一个带 tag-on-merge 本体的
+   tag（v1.19.0）只能在把本体加进来的那个 PR 合并之后人手打，之后才有得钉。 */
+const WANT_TAG = true;
 const CALLERS = {
   "review-gate": ".github/workflows/self-review-gate.yml",
   "labels-sync": ".github/workflows/self-labels-sync.yml",
+  "tag-on-merge": ".github/workflows/self-tag-on-merge.yml",
 };
 
-/* —— 1. 两份 caller 的形状 ——
+/* —— 1. 几份 caller 的形状 ——
    少一个事件、少半个 if、少一个权限、钉到会动的名字：全是「那条路永远不跑、
    而且不报错」的形状。判据复用各仓共用的那一份。 */
 for (const [kind, file] of Object.entries(CALLERS)) {

@@ -1,0 +1,79 @@
+name: tag-on-merge
+
+# PR 合进 main 之后，自动在 main 上打下一个 vX.Y.Z tag。
+#
+# **逻辑不在这儿**，在 GinkgoLeafLab/dev-infra 的 .github/workflows/tag-on-merge.yml
+# 与 .github/actions/tag-on-merge/，各仓库共用同一份。这里只留**必须留在 caller 的那几样**，
+# 理由逐条写在下面。这份文件是 dev-infra 的 adopt 脚本按模板生成的；改它要想清楚下面每一条注释。
+#
+# **版本号怎么定**（正文在 dev-infra 的 .github/actions/tag-on-merge/tag-on-merge.js 顶部）：
+#
+# | PR 上挂的标签 | 打出来的 tag |
+# |---|---|
+# | （不挂） | 升 minor：v1.3.0 → v1.4.0 |
+# | `release/major` | breaking change，升 major：v2.0.0 |
+# | `release/patch` | 很小的改动，升 patch：v1.3.1 |
+# | `release/skip` | 不打；跟着下一个要打 tag 的 PR 进那一版 |
+#
+# 同一个 PR 上只挂一个。这三个标签由 labels-sync 的 `release-labels: true` 建出来——
+# **没建之前挂不上**（GitHub 对打一个不存在的标签是静默不打），一律按默认 minor 打。
+#
+# **它红了就是「这一版没打 tag」**：去 Actions 里看它说了什么，修好（多半是标签）之后
+# 重跑失败的那一次，或者在 Actions 里手动触发一次，两者都重新读此刻的标签。
+
+# ---------------------------------------------------------------------------
+# **这份文件是本仓自己作为消费者的那一侧，文件名和别的仓不一样，这是刻意的**
+# ---------------------------------------------------------------------------
+#
+# 别的仓这份 caller 叫 .github/workflows/tag-on-merge.yml；在这个仓库里那个名字
+# 被**可复用工作流本体**占着（就是下面 uses: 指过来的那一份）。同名会把本体覆盖掉，
+# 所以本仓的 caller 一律加 self- 前缀。接线由 self-adopt.test.js 用 lintCaller 钉着
+# （README「这个仓库自己也接着这套东西」）。
+#
+# **自引用也按 tag 钉，不按当前分支**：钉 @v1.19.0 的意思是「本仓打 tag 用的是上一个
+# 发布版的脚本」——一个刚合进来、把打 tag 逻辑改坏了的 PR，不会用它自己那一版给本仓
+# 打出一个收不回来的版本号。改了本体忘了升这一行不是 bug，是这条性质。
+# v1.19.0 是本仓最后一个人手打的 tag：它是第一个带 tag-on-merge 本体的版本，
+# 在它存在之前这份文件无从钉起（README「本仓自己是怎么接上的」）。
+
+on:
+  # **不许加 paths / paths-ignore**：「这一版要不要打」由 PR 上的标签说了算
+  # （纯 README 的 PR 挂 release/skip），不由路径猜。
+  push:
+    branches: [main]
+  # 补打用：修好标签、或者人手打了一个 tag 越过卡住的那一段之后，从这里再跑一次。
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 只算不打：打印会打哪个 tag、依据是哪几个 PR
+        type: boolean
+        default: false
+
+permissions: {}
+
+# 一次只跑一个：两次同时算，会对同一个「下一个版本号」各建一次（后建的那次 422 变红）。
+# 不取消在跑的那个。更早排队的会被挤掉也不怕——每一次都从「上一个 tag 到此刻的 tip」
+# 整段重算，被挤掉的那一次的 PR 会被后面那次一起算进去。
+concurrency:
+  group: tag-on-merge
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    # 手动触发时可以选别的分支——那样跑的是那个分支上的这份文件，这里不认。
+    # job 级的 if 必须留在 caller：写进被调用方就变成「起了 runner 再判断」。
+    if: github.ref == 'refs/heads/main'
+    # 权限必须在这儿要：官方明写权限取自 calling job，被调用方**只能降不能升**。
+    # **这是 dev-infra 几份 caller 里唯一一份要 `contents` 的**：它要 checkout 本仓
+    # 读 git 历史、还要往本仓建 tag。用 Actions 自带的 GITHUB_TOKEN，不需要 PAT。
+    permissions:
+      contents: write       # 建 refs/tags/vX.Y.Z（只 POST，不 PATCH、不 force）
+      pull-requests: read   # 查 main 上每个 commit 是哪个 PR 合进来的、挂了什么标签
+    # 按不可变 tag 钉，不按分支。升级 = 改这一行的版本号，而改这一行要在本仓被评审。
+    uses: GinkgoLeafLab/dev-infra/.github/workflows/tag-on-merge.yml@v1.19.0
+    with:
+      # **写成 `== true`，别直接传 `inputs.dry-run`**：push 事件里没有 inputs，
+      # 直接传是个空值；`== true` 让它在两种事件里都是一个确定的布尔。
+      # 漏了这一行的后果是**手动触发时勾了 dry-run，它照样真的去建 tag**——
+      # 一个收不回来的版本号，而且不报错。
+      dry-run: ${{ inputs.dry-run == true }}
