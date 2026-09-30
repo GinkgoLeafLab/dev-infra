@@ -8,14 +8,15 @@
 | `.github/workflows/review-gate.yml` | 可复用工作流 | caller 调它 |
 | `.github/workflows/qa-gate.yml` | 可复用工作流 | caller 调它 |
 | `.github/workflows/labels-sync.yml` | 可复用工作流 | caller 调它 |
+| `.github/workflows/tag-on-merge.yml` | 可复用工作流：**PR 合进 main 之后自动打下一个 `vX.Y.Z`** | 要自动打 tag 的仓放一个 caller 调它 |
 | `.github/actions/qa-gate/` | 组合动作 + 判定脚本 + 它的测试 | **不直接用**，由上面那份工作流调 |
 | `.github/actions/review-gate-lock/` | 组合动作 + **PR 写锁判定** + 它的测试 | **不直接用**，由 `review-gate.yml` 调 |
 | `.github/actions/labels-sync/` | 组合动作 + 同步脚本 + 它的测试 + **共享的标签清单** | **不直接用**，由上面那份工作流调 |
+| `.github/actions/tag-on-merge/` | 组合动作 + **打 tag 的判定**（版本号怎么定、打在哪、什么时候宁可不打）+ 它的测试 | **不直接用**，由 `tag-on-merge.yml` 调 |
 | `.github/actions/docs-only/` | 组合动作 + 纯文档判定 + 它的测试 | **各仓的 workflow 直接 `uses:` 它**，当成一个步骤用 |
 | `shared/` | **第二层的源文件**：必须躺在各仓里才会被读到的那几份脚本与它们的测试 | 各仓把这个仓库整个当 **git submodule** 挂在 `vendor/dev-infra`，**不再各自落一份本地副本**。`core.hooksPath` 直接指进 `vendor/dev-infra/shared/githooks`；**PreToolUse hook 不直接指进子模块**，它走各仓自己那份 tracked 的 `scripts/guard-hook.js` 转接——子模块可以是空的，而空的时候 `node <缺失路径>` 是「非零退出、stdout 一个字节都没有」，PreToolUse 把它当 non-blocking error、**命令照常执行**（= 守卫静默放行） |
-| `adopt/` | **把一个仓库接上这套东西的脚本 + 那份 Skill**：写三份 caller、挂子模块、下发守卫入口、接 agent 定义的 subtree，以及事后 `--check` 体检同一套接线 | 接入时跑一次；之后每次升级 / 排查再跑 `--check` |
+| `adopt/` | **把一个仓库接上这套东西的脚本 + 那份 Skill**：写 caller（review-gate、labels-sync，要的话再加 qa-gate / tag-on-merge）、挂子模块、下发守卫入口、接 agent 定义的 subtree，以及事后 `--check` 体检同一套接线 | 接入时跑一次；之后每次升级 / 排查再跑 `--check` |
 | `.github/workflows/test.yml` | 本仓自己的测试，连同 `shared/` 里那份套件 | 不适用 |
-| `.github/workflows/tag-on-merge.yml` + `scripts/tag-on-merge.js`（连同它的测试） | **本仓自己的**：PR 合进 main 之后自动打下一个 `vX.Y.Z`——各仓 caller 钉的就是它。见下面「改这里的东西之后」 | 不适用 |
 | `.github/workflows/self-review-gate.yml` / `self-labels-sync.yml`、`scripts/guard-hook.js`、`.claude/`、`package.json` | **这个仓库自己作为消费者的那一侧**（形状和别的仓不一样，见下面那一节） | 不适用 |
 | `self-adopt.test.js` | 钉住上面那一侧的接线——`adopt.js --check` 在这个仓库里判不了，会拒绝跑 | 不适用 |
 | `submodule-shape.test.js` + `.gitattributes` | 钉住「各仓把这里当 submodule 挂上会拿到什么」 | 不适用 |
@@ -225,12 +226,51 @@ commit」——也就是 caller 钉的**同一个** tag 指向的那个 commit�
 代价约一分钟 Actions 时间——但它买到的是纠偏，不是追新清单。）
 
 **`release-labels` 是同一个形状的另一组**（`release/major` / `release/patch` /
-`release/skip`，默认 `false`）：读它们的是合并时自动打 tag 的那条流水线，
-今天只有 dev-infra 自己有，见下面「合并时自动打 tag」。别的仓不给它。
+`release/skip`，默认 `false`）：读它们的是 `tag-on-merge`，**只有装了它的仓才给 true**
+（adopt 的 `--tag-on-merge` 会一起置上）。和 `qa-labels` 只差一处：**没装的仓里这一行
+整行不写**，而不是写成 `false`——这个 input 是后来才加的，钉在更早 tag 上的 caller
+传一个被调用方没声明的 input，GitHub 会拒绝整条流水线。
 
-**三份 caller 都没有 `contents: read`，也都不该有**——见上面「为什么有组合动作这一层」。
-`permissions` 三份各不相同（`review-gate` / `qa-gate` 要
-`statuses: write` + `pull-requests: write`，`labels-sync` 要 `issues: write`），
+`tag-on-merge` 的 caller 又是一个形状，**它是唯一一份 push 触发、唯一一份要 `contents` 的**：
+
+```yaml
+name: tag-on-merge
+on:
+  # 不许加 paths：要不要打由 PR 上的标签说了算，按路径跳过就是漏打
+  push:
+    branches: [main]
+  workflow_dispatch:          # 修好标签之后补打
+    inputs:
+      dry-run:
+        type: boolean
+        default: false
+permissions: {}
+concurrency:
+  group: tag-on-merge
+  cancel-in-progress: false   # 两次同时算会对同一个版本号各建一次
+jobs:
+  tag:
+    if: github.ref == 'refs/heads/main'   # 手动触发选了别的分支不认
+    permissions:
+      contents: write       # checkout 本仓读 git 历史、往本仓建 tag
+      pull-requests: read   # 查每个 commit 是哪个 PR 合进来的、挂了什么标签
+    uses: GinkgoLeafLab/dev-infra/.github/workflows/tag-on-merge.yml@v1.19.0
+    with:
+      # 写成 `== true`：push 事件里没有 inputs。漏了这一行，手动触发勾了 dry-run 照样真建 tag
+      dry-run: ${{ inputs.dry-run == true }}
+```
+
+它为什么是 push 触发而不是 `pull_request_target`：它跑在**合并之后**，读的是已经在
+main 上、评审过的东西，不存在「PR 改本文件放行自己」那条路。为什么要 `contents`：
+它是这里唯一一条**要读调用方仓库自己的 git 历史**的共享流水线（从上一个 tag 数到 tip），
+那东西不可能跟着组合动作下发，所以被调用的那份工作流里有一步 checkout（`fetch-depth: 0`）。
+规则、失败方向与怎么收拾见下面「合并时自动打 tag」。
+
+**review-gate / qa-gate / labels-sync 三份 caller 都没有 `contents`，也都不该有**——
+见上面「为什么有组合动作这一层」；`tag-on-merge` 是唯一的例外，理由就在上一段。
+`permissions` 四份各不相同（`review-gate` / `qa-gate` 要
+`statuses: write` + `pull-requests: write`，`labels-sync` 要 `issues: write`，
+`tag-on-merge` 要 `contents: write` + `pull-requests: read`），
 **照着自己那一份抄，别抄隔壁那份**。
 
 ### `docs-only` 不是 caller，是一个步骤
@@ -269,7 +309,7 @@ commit」——也就是 caller 钉的**同一个** tag 指向的那个 commit�
   `test` 那条是必需检查，被 workflow 级过滤跳过的 PR 上这个检查根本不会产生，
   表现为永远 pending、那个 PR 永远合不了。这条禁令在各仓的 `test.yml` 上是同一条
 - **这个 job 要 checkout，所以它确实需要 `contents: read`**——
-  上面那句「三份 caller 都没有 `contents: read`」说的是那三份 caller，别推广到这里
+  上面那句「三份 caller 都没有 `contents`」说的是 review-gate / qa-gate / labels-sync，别推广到这里
 - **判定绿了不代表那件事做了。** 跳过时它会在检查页上打一条 `::notice::` 说明这一点，
   各仓的 `skipped:` 就是那句话里的宾语，写准它
 
@@ -360,13 +400,14 @@ uses: GinkgoLeafLab/dev-infra/.github/workflows/review-gate.yml@main   # ❌
 **tag 不移动，永远是打一个新的。** 这正是「未经各仓评审的改动不会生效」那句话成立的
 原因：升级只能靠改各仓 caller 里那一行 `uses:`，而那一行要在各仓被评审。
 
-1. 在这个仓库走 PR、评审、合并。**`qa-gate.yml` / `labels-sync.yml` 内层那三行
-   自引用用的是 `$/`，这一步不用再改它们**——`$/` 自动跟着这个 commit 走，
+1. 在这个仓库走 PR、评审、合并。**`qa-gate.yml` / `labels-sync.yml` / `tag-on-merge.yml`
+   内层那几行自引用用的是 `$/`，这一步不用再改它们**——`$/` 自动跟着这个 commit 走，
    没有第二个版本号要在 PR 里对齐（以前按 `@vX.Y.Z` 引用时，那一行写的就是
    「该打哪个 tag」的唯一真相；这一条随着换成 `$/` 一起作废，见上面「为什么有
-   组合动作这一层」）。**要偏离默认的 minor，在这一步给 PR 挂标签**，见下面那张表
-2. **合并之后 `tag-on-merge` 自动打新 tag**，不用人动手。**去 Actions 里确认那一次
-   运行是绿的、tag 真的出现了**——它红了就是「这一版没有 tag」，见下面「它红了怎么办」
+   组合动作这一层」）。**要偏离默认的 minor，在这一步给 PR 挂标签**，见下面「合并时自动打 tag」
+2. **在合并后的 commit 上打一个新 tag。** 本仓接上 `self-tag-on-merge.yml` 之后这一步是
+   自动的——**去 Actions 里确认那一次运行是绿的、tag 真的出现了**。**接上之前（见下面
+   「本仓自己什么时候开始自动打」）这一步仍是人做的**（agent 在这个环境里打不了 tag，会拿到 403）
 3. 各仓库把自己 caller 里的 `uses:` 升到新版本，走各自的 PR 与评审
 
 **顺序反了会红一片**：消费仓的 caller 先合、tag 后打，那些 caller 指向一个不存在的
@@ -375,21 +416,23 @@ uses: GinkgoLeafLab/dev-infra/.github/workflows/review-gate.yml@main   # ❌
 自动打 tag 让这条顺序多数时候自己成立，但**它不替你检查**：第 2 步红着的时候去合
 第 3 步，结果和以前忘了打 tag 一模一样。
 
-### 合并时自动打 tag（`tag-on-merge`）
+## 合并时自动打 tag（`tag-on-merge`）
 
-`.github/workflows/tag-on-merge.yml` 在每次 push 到 main 时跑（也可以在 Actions 里手动触发，
-带一个 `dry-run` 开关），逻辑在 `scripts/tag-on-merge.js`，由 `scripts/tag-on-merge.test.js`
-钉着（`test.yml` 里一步，PR 上就跑）。**它是本仓自己的流水线，不是给各仓的可复用工作流。**
+可复用工作流 `.github/workflows/tag-on-merge.yml` + 组合动作 `.github/actions/tag-on-merge/`，
+逻辑在 `tag-on-merge.js`，由同目录的 `tag-on-merge.test.js` 钉着（`test.yml` 里一步，PR 上
+就跑）。各仓放一个 caller（上面「怎么用」里那一份，adopt 的 `--tag-on-merge` 会写），
+每次 push 到 main 时在**那个仓库**上打 tag。**只认 `main`、只认严格的 `vX.Y.Z`**：
+默认分支不叫 main 或者 tag 是别的形状的仓，它会出声地判不了，接之前先看一眼。
 
-**版本号：默认 minor，标签覆盖。** 默认 minor 照抄的是这个仓库的实际做法——v1.1.0 到
-v1.18.0 这十八个手打的 tag 全是 minor，连纯修 bug、删掉一整个机制的那几次也是。
-要偏离，在 PR 上挂**恰好一个**：
+**版本号：默认 minor，PR 上的标签覆盖。** 默认 minor 照抄的是这几个仓的实际做法——
+接它之前 dev-infra 的 v1.1.0~v1.18.0、dev-agents 的 v1.0.0~v1.3.0、dev-standards 的
+v1.0.0 全是手打的 minor，连纯修 bug、删掉一整个机制的那几次也是。要偏离，在 PR 上挂**恰好一个**：
 
 | 标签 | 打出来的 tag | 什么时候挂 |
 |---|---|---|
-| （不挂） | minor：`v1.18.0` → `v1.19.0` | 绝大多数 PR |
-| `release/major` | `v2.0.0` | 破坏性变更：各仓照旧升那一行 `uses:` 会坏 |
-| `release/patch` | `v1.18.1` | 只修 bug，行为契约不变 |
+| （不挂） | 升 minor：`v1.18.0` → `v1.19.0` | 绝大多数 PR |
+| `release/major` | 升 major：`v2.0.0` | **breaking change**：各仓照旧升那一行 `uses:` 会坏 |
+| `release/patch` | 升 patch：`v1.18.1` | **很小的改动**：修 bug、措辞，行为契约不变 |
 | `release/skip` | 不打 | 这个 PR 单独不值得一个新版本（纯 README 之类）；它会跟着下一个要打 tag 的 PR 进那一版 |
 
 **它看的是「上一个 tag 到 main 的 tip」之间合进来的所有 PR，取最高的一级**
@@ -408,22 +451,40 @@ fetch、按新 tip 重算一遍再建。
 没有 PATCH、没有 force——tag 不移动是整套「钉 tag」的前提。测试里有一条
 专门钉「源码里不许出现这几样」。
 
-**它红了怎么办**（红 = 这一版没有 tag，**先别去合各仓升 `uses:` 的 PR**）：
+**它红了怎么办**（红 = 这一版没有 tag；在 dev-infra 上，**先别去合各仓升 `uses:` 的 PR**）：
 
 | 它说 | 怎么办 |
 |---|---|
 | 某个 PR 同时挂了两个 `release/*` | 去那个（已合并的）PR 上摘掉一个，然后重跑失败的那一次，或者手动触发一次——两者都重新读此刻的标签 |
 | 某个 commit 找不到把它合进来的 PR（直推？） | 判不了它该算哪一级。**人手打一个 tag 越过它**（这仍然只有人做得了，agent 会拿 403），之后的合并照常自动打 |
 | 最新的 `vX.Y.Z` 不在 main 的历史上 | 有人在别的分支上打了 tag，「下一个」无从算起——人来定 |
-| 建 tag 403 | `GITHUB_TOKEN` 没拿到 `contents: write`（组织设置可能压着），或者有一条 tag ruleset 不放 github-actions 过。**那一层是人去仓库 / 组织设置里点的** |
+| 一个 `vX.Y.Z` 都没有 | 第一版请人手打，之后自动 |
+| 建 tag 403（原话不带 workflow） | `GITHUB_TOKEN` 没拿到 `contents: write`（组织设置可能压着），或者有一条 tag ruleset 不放 github-actions 过。**那一层是人去仓库 / 组织设置里点的** |
+| 建 tag 403（原话带 workflow） | main 连着几轮都在往前走，每次建的时候那个 commit 都已经不是 tip 了。等合并停下来，手动触发一次 |
 | 建 tag 422 | 这个版本号这一刻刚被别人建了。不覆盖、不移动——人来看 |
 
 **`release/*` 这三个标签从哪来**：清单是 `.github/actions/labels-sync/labels.release.json`，
-由 labels-sync 的 `release-labels` 这个 input 控制要不要建（**默认 `false`**，和 `qa-labels`
-同一条理由：只有装了读它们的那条流水线的仓才该有）。本仓的 `self-labels-sync.yml`
-要升到**包含这个 input 的那个 tag** 并给 `true` 之后，这三个标签才会真的建出来——
-在那之前它们挂不上（GitHub 对打一个不存在的标签是**静默不打**），**所有合并一律按默认
-minor 打**，和这十八个 tag 的做法一样。
+由那个仓 labels-sync caller 的 `release-labels: true` 建出来（见上面「怎么用」）。
+**没建之前它们挂不上**（GitHub 对打一个不存在的标签是**静默不打**），**所有合并一律按
+默认 minor 打**。所以接 tag-on-merge 的仓也要有一份 labels-sync caller，
+adopt 的 `--check` 会判这两半一致不一致。
+
+**接到「整棵根树被别的仓 subtree 拉走」的仓上**（dev-agents 就是：各仓的
+`.claude/agents/common` 是它的根树）：caller 文件会跟着进每个消费仓的
+`.claude/agents/common/.github/workflows/`。在那儿是惰性的——GitHub 只读仓库根下的
+`.github/workflows`——无害，只是别奇怪它为什么在那儿。
+
+### 本仓自己什么时候开始自动打
+
+本仓的 caller 一律按 tag 钉自己（下面「这个仓库自己也接着这套东西」），而**第一个带
+`tag-on-merge` 本体的 tag 要等把它加进来的那个 PR 合并之后才存在**——在那之前写
+`self-tag-on-merge.yml`，就是钉一个还不存在的版本（v1.1.0 就是这么发坏的）。所以：
+
+1. 加进 `tag-on-merge` 的那个 PR 合并后，**人手打最后一次 tag**（按默认规则就是 `v1.19.0`）
+2. 一个 PR 同时做三件事：加 `self-tag-on-merge.yml` 钉那个 tag、把 `self-labels-sync.yml`
+   升到那个 tag 并传 `release-labels: true`、把 `self-adopt.test.js` 里的 `WANT_TAG` 改成
+   `true` 并把它加进 `CALLERS`。**这个 PR 合并的那一刻，本仓第一次自动打 tag**
+3. dev-agents、dev-standards 等要用的仓同样在那个 tag 存在之后再接
 
 ## `shared/`：第二层的源文件
 
@@ -486,13 +547,13 @@ PreToolUse 把非零退出当 non-blocking error——**守卫静默放行**；
 
 ## `adopt/`：把一个仓库接上来
 
-各仓要接的东西分散在四处（三份 caller、一个 submodule、一份 tracked 的守卫入口转接、
+各仓要接的东西分散在四处（几份 caller、一个 submodule、一份 tracked 的守卫入口转接、
 一条 subtree），**每一处漏了都不报错**。所以接入这件事本身收成一个脚本和一份 Skill：
 
 ```bash
 # 全新仓库：先把脚本弄到盘上，它自己会把子模块挂好、钉在最新的 vX.Y.Z 上
 git clone --depth 1 https://github.com/GinkgoLeafLab/dev-infra /tmp/dev-infra
-node /tmp/dev-infra/adopt/adopt.js            # 要 QA 门禁就加 --qa
+node /tmp/dev-infra/adopt/adopt.js            # 要 QA 门禁就加 --qa；要合并时自动打 tag 就加 --tag-on-merge
 
 # 已经接过的仓库：用自己那份（它就在子模块里），--check 一个字节都不写
 node vendor/dev-infra/adopt/adopt.js --check
@@ -502,7 +563,7 @@ node vendor/dev-infra/adopt/adopt.js --check
 |---|---|
 | `adopt/adopt.js` | 入口，以及**判定与渲染那一半**（纯函数：选 tag、渲染 caller、体检 caller、并 settings / package.json） |
 | `adopt/run.js` | **真的动盘上的东西那一半**：问 git、读写文件、按顺序跑那几步、打结论 |
-| `adopt/templates/` | 三份 caller、守卫入口转接、`docs-only` 那个步骤的片段 |
+| `adopt/templates/` | 各份 caller（review-gate / qa-gate / labels-sync / tag-on-merge）、守卫入口转接、`docs-only` 那个步骤的片段 |
 | `adopt/SKILL.md` | 给 agent 的那份：前提、每一条 ❌ 怎么办、PR 怎么开、永远不要做的几件事 |
 | `adopt/adopt.test.js` | 它的测试，含两种消费仓（CJS / **`"type": "module"`**）的端到端 |
 
@@ -548,7 +609,7 @@ package.json** 决定模块系统，往上找到的第一份会是消费仓自�
 |---|---|---|---|
 | review-gate caller | `.github/workflows/review-gate.yml` | `.github/workflows/self-review-gate.yml` | 同名会把**本体**盖掉 |
 | labels-sync caller | `.github/workflows/labels-sync.yml` | `.github/workflows/self-labels-sync.yml` | 同上。**它里面那条 `paths:` 也跟着改成了自己的路径**——文件名和那条 `paths:` 是同一处真相的两半，只改一半的表现是「升了版本号、这条流水线根本没触发」，绿的、Actions 里连一条失败记录都没有 |
-| 合并时自动打 tag | 没有 | `.github/workflows/tag-on-merge.yml`（本仓自己的流水线，不是 caller） | 它打的就是各仓钉的那个版本号；别的仓怎么发版不归这儿管 |
+| tag-on-merge caller | `.github/workflows/tag-on-merge.yml`（装了才有） | `.github/workflows/self-tag-on-merge.yml`——**还没接**，等第一个带它的 tag，见「本仓自己什么时候开始自动打」 | 同名会把**本体**盖掉 |
 | qa-gate caller | 装了 QA 门禁的仓才有 | **没装** | 本仓的改动由 `test.yml` 那一排自动测试覆盖，没有「要人手点一遍」的东西。所以 `qa-labels` 也必须是 `false`：给 `true` 等于建两个没有任何东西在读的标签 |
 | 第二层的判定逻辑 | submodule `vendor/dev-infra` | **树里的 `shared/`**，不挂子模块 | 挂一个指回自己的子模块，本仓的钩子跑的就是**钉在某个旧 tag 上的那一版守卫**，而不是工作区里正在改的这一版——守卫改坏了本仓自己反而感觉不到，那正是这套东西要消灭的静默失效 |
 | 守卫入口 | `scripts/guard-hook.js` 指进子模块 | 同一份模板，那行 `GUARD` 指 `../shared/guard-branch.js` | 逐字节等于 `renderShim(模板, SELF_GUARD_REL)`，由 `self-adopt.test.js` 钉着。**别手改它**，改模板再重新生成 |

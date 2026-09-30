@@ -63,6 +63,17 @@ check("isImmutableTag 不认 v1", A.isImmutableTag("v1"), false);
   check("qa-labels 跟着 --qa 走", /qa-labels:\s*true/.test(out), true);
   check("qa-labels 默认 false", /qa-labels:\s*false/.test(A.renderCaller(TPL("labels-sync"), { tag: "v1.14.0", qa: false })), true);
   throws("钉到分支名当场炸", () => A.renderCaller(TPL("review-gate"), { tag: "main", qa: false }), /不是不可变 tag/);
+  throws("tag-on-merge 钉到分支名同样当场炸", () => A.renderCaller(TPL("tag-on-merge"), { tag: "main", qa: false }), /不是不可变 tag/);
+
+  /* release-labels：没装 tag-on-merge 时**整行不在**，而不是写成 false——钉在更早 tag 上的
+     caller 传一个被调用方没声明的 input，GitHub 会拒绝整条流水线。 */
+  const noRel = A.renderCaller(TPL("labels-sync"), { tag: "v1.14.0", qa: false });
+  check("没装 tag-on-merge：labels-sync 里一个 release-labels 都没有", /release-labels/.test(noRel), false);
+  check("没装 tag-on-merge：也没留下占位符", /__[A-Z_]+__/.test(noRel), false);
+  const rel = A.renderCaller(TPL("labels-sync"), { tag: "v1.14.0", qa: false, release: true });
+  check("装了 tag-on-merge：release-labels: true", /^\s+release-labels: true\b/m.test(rel), true);
+  check("装了 tag-on-merge：其余一个字节不变（只多这一行）",
+    rel.split("\n").filter((l) => !/release-labels/.test(l)).join("\n"), noRel.replace(/\n$/, "") + (noRel.endsWith("\n") ? "\n" : ""));
 }
 {
   const shim = A.renderShim(fs.readFileSync(path.join(__dirname, "templates", "guard-hook.js"), "utf8"));
@@ -72,15 +83,17 @@ check("isImmutableTag 不认 v1", A.isImmutableTag("v1"), false);
 }
 
 /* —— caller 体检：先在自家模板上必须全绿 —— */
-for (const kind of ["review-gate", "qa-gate", "labels-sync"]) {
-  const text = A.renderCaller(TPL(kind), { tag: "v1.14.0", qa: true });
-  const { problems } = A.lintCaller(kind, text, { qa: true });
-  check(`${kind} 模板自己过体检`, problems.join(" | "), "");
+for (const kind of ["review-gate", "qa-gate", "labels-sync", "tag-on-merge"]) {
+  for (const release of [true, false]) {
+    const text = A.renderCaller(TPL(kind), { tag: "v1.14.0", qa: true, release });
+    const { problems } = A.lintCaller(kind, text, { qa: true, release });
+    check(`${kind} 模板自己过体检（release=${release}）`, problems.join(" | "), "");
+  }
 }
 
 /* —— 然后每一条都要真的判得出来（变异） —— */
-function lint(kind, mutate, tag = "v1.14.0", qa = true) {
-  return A.lintCaller(kind, mutate(A.renderCaller(TPL(kind), { tag, qa })), { qa }).problems.join(" | ");
+function lint(kind, mutate, tag = "v1.14.0", qa = true, release = true) {
+  return A.lintCaller(kind, mutate(A.renderCaller(TPL(kind), { tag, qa, release })), { qa, release }).problems.join(" | ");
 }
 check("types 里少了 synchronize 判得出来",
   /synchronize/.test(lint("review-gate", (t) => t.replace("types: [labeled, synchronize]", "types: [labeled]"))), true);
@@ -102,6 +115,40 @@ check("labels-sync 抄了隔壁的 statuses 判得出来",
   /statuses/.test(lint("labels-sync", (t) => t.replace(/^(\s+)issues: write$/m, "$1issues: write\n$1statuses: write"))), true);
 check("labels-sync 少了 issues: write 判得出来",
   /issues: write/.test(lint("labels-sync", (t) => t.replace(/^(\s+)issues: write$/m, "$1pull-requests: write"))), true);
+
+/* tag-on-merge：每一条都是「漏了不报错」——不跑、漏打、或者更糟，**该只算的时候真的建了**。 */
+const tom = (mutate) => lint("tag-on-merge", mutate);
+check("tag-on-merge 不是 push 到 main 判得出来",
+  /push 到 main/.test(tom((t) => t.replace("branches: [main]", "branches: [master]"))), true);
+check("tag-on-merge 挂到 PR 事件上判得出来",
+  /PR 事件/.test(tom((t) => t.replace(/^on:\n/m, "on:\n  pull_request_target:\n"))), true);
+check("tag-on-merge 加了 paths 判得出来",
+  /paths/.test(tom((t) => t.replace("    branches: [main]\n", "    branches: [main]\n    paths:\n      - src/**\n"))), true);
+check("tag-on-merge 少了 workflow_dispatch 判得出来",
+  /workflow_dispatch/.test(tom((t) => t.replace(/^  workflow_dispatch:\n(    .*\n|      .*\n|        .*\n)*/m, ""))), true);
+check("tag-on-merge 没把 dry-run 传下去判得出来",
+  /dry-run/.test(tom((t) => t.replace(/^\s+dry-run: \$\{\{ inputs\.dry-run == true \}\}\n/m, ""))), true);
+check("tag-on-merge 直接传 inputs.dry-run（push 事件里是空值）也判得出来",
+  /dry-run/.test(tom((t) => t.replace("${{ inputs.dry-run == true }}", "${{ inputs.dry-run }}"))), true);
+check("tag-on-merge 少了只认 main 的 job 级 if 判得出来",
+  /只认 main/.test(tom((t) => t.replace(/^\s+if: github\.ref == 'refs\/heads\/main'\n/m, ""))), true);
+check("tag-on-merge 的 contents 写成 read 判得出来",
+  /contents: write/.test(tom((t) => t.replace(/contents: write/, "contents: read"))), true);
+check("tag-on-merge 少了 pull-requests: read 判得出来",
+  /pull-requests: read/.test(tom((t) => t.replace(/^\s+pull-requests: read.*\n/m, ""))), true);
+check("tag-on-merge 抄了隔壁的 statuses: write 判得出来",
+  /写权限/.test(tom((t) => t.replace(/^(\s+)contents: write/m, "$1statuses: write\n$1contents: write"))), true);
+check("tag-on-merge 的并发组会取消在跑的判得出来",
+  /cancel-in-progress/.test(tom((t) => t.replace("cancel-in-progress: false", "cancel-in-progress: true"))), true);
+check("tag-on-merge 钉到 @main 判得出来",
+  /不是不可变 tag/.test(tom((t) => t.replace("@v1.14.0", "@main"))), true);
+check("tag-on-merge 指到别的工作流判得出来",
+  /tag-on-merge\.yml/.test(tom((t) => t.replace("workflows/tag-on-merge.yml@", "workflows/labels-sync.yml@"))), true);
+/* 剥注释的漏报方向：接线真的少了，而注释里逐字带着那一行 → 必须红 */
+check("tag-on-merge 的 if 只在注释里时照样判得出来",
+  /只认 main/.test(tom((t) => t.replace(/^(\s+)if: github\.ref == 'refs\/heads\/main'$/m, "$1# if: github.ref == 'refs/heads/main'"))), true);
+check("tag-on-merge 的 dry-run 只在注释里时照样判得出来",
+  /dry-run/.test(tom((t) => t.replace(/^(\s+)dry-run: \$\{\{ inputs\.dry-run == true \}\}$/m, "$1# dry-run: ${{ inputs.dry-run == true }}"))), true);
 
 /* —— 剥注释那一步的正对照：**两个方向各一条** ——
    这儿上一版是一条选错了路径的变异（「把接线删掉、只留注释里提过，看它还报不报」），
@@ -129,15 +176,32 @@ check("qa-labels 只在注释里为 true 时，不算本仓传了 true",
   /装了 qa-gate 却没传/.test(A.lintCaller("labels-sync",
     A.renderCaller(TPL("labels-sync"), { tag: "v1.14.0", qa: false })
       .replace(/^(\s+)qa-labels: false$/m, "$1# 升级时记得把 qa-labels: true 打开\n$1qa-labels: false"),
-    { qa: true }).problems.join(" | ")), true);
+    { qa: true, release: false }).problems.join(" | ")), true);
 check("同一份文件在没装 qa-gate 的仓里是对的，不许因为那行注释报错",
   A.lintCaller("labels-sync",
     A.renderCaller(TPL("labels-sync"), { tag: "v1.14.0", qa: false })
       .replace(/^(\s+)qa-labels: false$/m, "$1# 升级时记得把 qa-labels: true 打开\n$1qa-labels: false"),
-    { qa: false }).problems.join(" | "), "");
+    { qa: false, release: false }).problems.join(" | "), "");
 
 /* 不告诉它本仓装没装 qa-gate 就抛：**静默少一条判定**正是上面那个洞的形状。 */
 throws("labels-sync 不给 qa 就抛", () => A.lintCaller("labels-sync", A.renderCaller(TPL("labels-sync"), { tag: "v1.14.0", qa: true })), /必须告诉它/);
+throws("labels-sync 给了 qa 不给 release 也抛", () => A.lintCaller("labels-sync", A.renderCaller(TPL("labels-sync"), { tag: "v1.14.0", qa: true }), { qa: true }), /tag-on-merge/);
+
+/* release-labels 那条一致性判定，两个方向 + 注释那条路。
+   漏报的后果：装了 tag-on-merge、标签却从没建出来——作者挂 release/major 挂不上，
+   **每一次都静默按默认 minor 打**。 */
+const relText = (release) => A.renderCaller(TPL("labels-sync"), { tag: "v1.14.0", qa: false, release });
+check("装了 tag-on-merge 却没传 release-labels 判得出来",
+  /装了 tag-on-merge 却没传/.test(A.lintCaller("labels-sync", relText(false), { qa: false, release: true }).problems.join(" | ")), true);
+check("没装 tag-on-merge 却传了 release-labels: true 判得出来",
+  /没有 tag-on-merge/.test(A.lintCaller("labels-sync", relText(true), { qa: false, release: false }).problems.join(" | ")), true);
+check("release-labels: true 只在注释里时，不算本仓传了",
+  /装了 tag-on-merge 却没传/.test(A.lintCaller("labels-sync",
+    relText(false).replace(/^(\s+)qa-labels: false$/m, "$1# 装了 tag-on-merge 之后加一行 release-labels: true\n$1qa-labels: false"),
+    { qa: false, release: true }).problems.join(" | ")), true);
+check("release-labels: false 写明了也算没传（没装的仓里是对的）",
+  A.lintCaller("labels-sync", relText(false).replace(/^(\s+)qa-labels: false$/m, "$1qa-labels: false\n$1release-labels: false"),
+    { qa: false, release: false }).problems.join(" | "), "");
 
 /* —— 守卫入口该叫什么名字 ——
    **这条是端到端那一节抓出来的真实 bug**：守卫入口住在消费仓里，所以 node 按消费仓
@@ -263,7 +327,7 @@ function upstream(dir, files) {
    守卫入口住在消费仓里，模块系统跟着消费仓走——所以「它到底拦不拦得住」这件事
    在两种仓库里是两条不同的路，只跑一种等于只验了一半。
    `deep` 那一节（变异、幂等、模块系统的正对照）只在 ESM 那一轮跑，跑两遍不多买到东西。 */
-function e2e(variant, consumerPkg, wantShim, deep) {
+function e2e(variant, consumerPkg, wantShim, deep, withTag) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "adopt-"));
   try {
     /* 假的 dev-infra：真的把本仓的 shared/ 与 adopt/ 拷进去——消费仓挂上之后
@@ -311,7 +375,7 @@ function e2e(variant, consumerPkg, wantShim, deep) {
     check(`${variant}：而且是在写任何东西之前拒绝的`, fs.existsSync(path.join(repo, ".github/workflows/review-gate.yml")), false);
 
     /* 接入 */
-    const run1 = node(repo, [...base, "--qa"]);
+    const run1 = node(repo, [...base, "--qa", ...(withTag ? ["--tag-on-merge"] : [])]);
     check(`${variant}：接入跑成` + (run1.ok ? "" : `（${run1.out.split("\n").filter((l) => /❌/.test(l)).join(" / ")}）`), run1.ok, true);
 
     /* 读不到就返回空串，**不抛**：一条断言失败不该把后面所有断言连跑的机会都拿走
@@ -322,6 +386,10 @@ function e2e(variant, consumerPkg, wantShim, deep) {
     check(`${variant}：写了 review-gate caller`, /@v9\.9\.0\s*$/m.test(read(".github/workflows/review-gate.yml")), true);
     check(`${variant}：写了 qa-gate caller`, has(".github/workflows/qa-gate.yml"), true);
     check(`${variant}：qa-labels 跟着 --qa 置 true`, /qa-labels:\s*true/.test(read(".github/workflows/labels-sync.yml")), true);
+    check(`${variant}：tag-on-merge caller ${withTag ? "写了、钉在那个 tag 上" : "没给 --tag-on-merge 就不写"}`,
+      withTag ? /tag-on-merge\.yml@v9\.9\.0\s*$/m.test(read(".github/workflows/tag-on-merge.yml")) : !has(".github/workflows/tag-on-merge.yml"), true);
+    check(`${variant}：release-labels ${withTag ? "跟着 --tag-on-merge 置 true" : "整行不在"}`,
+      withTag ? /^\s+release-labels: true\b/m.test(read(".github/workflows/labels-sync.yml")) : !/release-labels/.test(read(".github/workflows/labels-sync.yml")), true);
     check(`${variant}：守卫入口的扩展名跟着模块系统走`, has(wantShim), true);
     check(`${variant}：PreToolUse 指向守卫入口`,
       JSON.stringify(readJson(".claude/settings.json")).includes(wantShim), true);
@@ -404,8 +472,10 @@ if (process.platform === "win32") {
   try { subtree = execFileSync("git", ["subtree", "-h"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }); }
   catch (e) { subtree = (e.stdout || "") + (e.stderr || ""); }
   if (/usage: git subtree/.test(subtree)) {
-    e2e("CJS 消费仓", { name: "c", scripts: { test: "node t.js" } }, "scripts/guard-hook.js", false);
-    e2e("ESM 消费仓", { name: "c", type: "module", scripts: { test: "node t.js" } }, "scripts/guard-hook.cjs", true);
+    /* 一轮装 tag-on-merge、一轮不装：两条路（写这一份 caller + release-labels 置 true、
+       以及什么都不多写）各自真的走一遍，再各自过一次 --check。 */
+    e2e("CJS 消费仓", { name: "c", scripts: { test: "node t.js" } }, "scripts/guard-hook.js", false, true);
+    e2e("ESM 消费仓", { name: "c", type: "module", scripts: { test: "node t.js" } }, "scripts/guard-hook.cjs", true, false);
   }
   else {
     /* 出声地失败，不是跳过：这一半验的是「真的接得上」，没跑等于没验。 */

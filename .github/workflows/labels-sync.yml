@@ -42,7 +42,7 @@ on:
       release-labels:
         description: >-
           这个仓要不要 release/major / release/patch / release/skip。
-          **只有装了「合并时自动打 tag」那条流水线的仓才给 true**（今天只有 dev-infra 自己），
+          **只有装了 tag-on-merge（合并时自动打 tag）的仓才给 true**，
           理由见组合动作的 action.yml。
         required: false
         type: boolean

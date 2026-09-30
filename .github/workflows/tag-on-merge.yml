@@ -1,73 +1,65 @@
-name: tag-on-merge
+name: tag-on-merge (reusable)
 
-# PR 合进 main 之后，自动在 main 上打下一个 vX.Y.Z tag。
+# PR 合进 main 之后，在调用方仓库 main 的 tip 上自动打下一个 vX.Y.Z tag。
+# 各仓库只留一个二十来行的 caller，逻辑只有这一份。
 #
-# **这份是本仓自己的流水线**（和 test.yml 一样），不是可复用工作流、也不是 caller——
-# 它打的是 dev-infra 自己的版本号，各仓 caller 里那一行 `uses: …@vX.Y.Z` 钉的就是它。
-# 替的是 README「改这里的东西之后」那三步里的第 2 步。
+# **逻辑不在这儿**，在 .github/actions/tag-on-merge/tag-on-merge.js（版本号怎么定、
+# 为什么打在 tip、什么时候宁可不打，理由逐条写在那份文件顶部），由同目录的
+# tag-on-merge.test.js 钉着。一句话版本：
 #
-# **逻辑不在这儿**，在 scripts/tag-on-merge.js（版本号怎么定、打在哪个 commit、
-# 什么时候宁可不打，理由逐条写在那份文件顶部），由 scripts/tag-on-merge.test.js 钉着。
-# 一句话版本：
-#
-# - 默认 minor（这个仓库十八个手打的 tag 全是 minor）；PR 上挂 `release/major` /
-#   `release/patch` / `release/skip` 覆盖
+# - 默认 minor（dev-infra 十八个、dev-agents 四个、dev-standards 一个手打的 tag 全是
+#   minor）；PR 上挂 `release/major` / `release/patch` / `release/skip` 覆盖
 # - 看的是「上一个 tag 到 main 的 tip」之间合进来的**所有** PR，取最高的那一级
-# - 打在**运行那一刻 main 的 tip** 上，不是触发这次运行的那个 commit——
-#   `GITHUB_TOKEN` 给非 tip 的 commit 建 tag，碰上之后改过 workflow 的会被拒
+# - 打在**运行那一刻 main 的 tip** 上——`GITHUB_TOKEN` 给非 tip 的 commit 建 tag，
+#   碰上之后改过 workflow 的会被拒
 # - **只建不改**：tag 已存在就红，绝不覆盖、绝不移动
 #
-# **它红了就是「这一版没打 tag」**。这时别去合各仓那边升 `uses:` 的 PR——
-# 顺序永远是先有 tag、再合 caller（README「改这里的东西之后」）。修好标签之后
-# 重跑失败的那一次，或者在 Actions 里手动触发一次，两者都重新读此刻的标签。
+# ---------------------------------------------------------------------------
+# caller 必须自己提供这几样（模板在 adopt/templates/tag-on-merge.yml，
+# 形状由 adopt.js 的 lintCaller('tag-on-merge') 体检）
+# ---------------------------------------------------------------------------
+#
+# 1. `on: push: branches: [main]`（**不许加 paths**：要不要打由标签说了算）+
+#    `workflow_dispatch`（修好标签之后补打）。可复用工作流没有自己的触发器。
+# 2. `permissions: { contents: write, pull-requests: read }` 写在**调用这份文件的
+#    那个 job 上**——官方明写权限取自 calling job，被调用方只能降不能升。
+#    **这是四份共享 caller 里唯一一份要 `contents` 的**：它要 checkout 调用方仓库、
+#    还要往里建 tag。
+# 3. job 级 `if: github.ref == 'refs/heads/main'`：手动触发时可以选别的分支，
+#    那样跑的是那个分支上的 caller。
+# 4. `concurrency: { group: tag-on-merge, cancel-in-progress: false }`：两次同时算
+#    会对同一个「下一个版本号」各建一次。**别在这份文件里再写一个同名的组**——
+#    caller 和被调用方撞同一个并发组，GitHub 会判成死锁、把被调用的那个 job 取消
+#    （"Canceling since a deadlock for concurrency group … was detected"）。
 
 on:
-  # 不加 paths / paths-ignore：「这一版要不要打」由 PR 上的标签说了算
-  # （纯 README 的 PR 挂 release/skip），不由路径猜——adopt/SKILL.md 这种 .md
-  # 是各仓顺着子模块真的会读到的东西，按路径判「纯文档不打」会把它漏掉。
-  push:
-    branches: [main]
-  # 补打用：修好标签、或者人手打了一个 tag 越过卡住的那一段之后，从这里再跑一次。
-  workflow_dispatch:
+  workflow_call:
     inputs:
       dry-run:
         description: 只算不打：打印会打哪个 tag、依据是哪几个 PR
+        required: false
         type: boolean
         default: false
 
-permissions: {}
-
-# 一次只跑一个：两次同时算，会对同一个「下一个版本号」各建一次（后建的那次 422 变红）。
-# 不取消在跑的那个，让它把自己那一轮做完，后面那次读到的就是它留下的 tag。
-# GitHub 的并发组只留**一个**排队的，更早排队的会被挤掉——这里不怕：每一次都从
-# 「上一个 tag 到此刻的 tip」整段重算，被挤掉的那一次的 PR 会被后面那次一起算进去。
-concurrency:
-  group: tag-on-merge
-  cancel-in-progress: false
-
 jobs:
   tag:
-    # 手动触发时可以选别的分支——那样跑的是那个分支上的脚本，这里不认。
-    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions:
-      contents: write       # 建 refs/tags/vX.Y.Z（脚本只 POST，不 PATCH、不 force）
-      pull-requests: read   # 查 main 上每个 commit 是哪个 PR 合进来的、挂了什么标签
+    # permissions 不写在这儿，见上面第 2 条。
     steps:
       # fetch-depth: 0 是前提：要从上一个 tag 数到 tip，浅克隆里那段历史和 tag 都不在。
+      # 这里 checkout 的是**调用方仓库**（github.repository 是 caller 的）。
       # 脚本自己还会再 fetch 一次 main 和 tags，拿的是运行那一刻的 tip。
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      # 不加 setup-node：脚本零依赖，用 runner 自带的 node（和 test.yml 同一个理由）。
+      # 同仓自引用用 `$/`：解析到「这份文件所在的仓库，运行时那个 commit」，
+      # 和 qa-gate / labels-sync 同一个理由（不看任何 tag，没有前向引用）。
+      # **不能带 `@{ref}`，也不能写成 `./`**——`./` 对着工作区解析，而工作区里
+      # 此刻是调用方仓库，那里没有这个动作。tag-on-merge.test.js 钉着这一行。
       - name: 打 tag
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          DRY_RUN: ${{ inputs.dry-run }}
-        # 参数拼在 shell 里而不是插进 run 的文本：这个仓库其余每一处都这么写。
-        run: |
-          args=()
-          [ "$DRY_RUN" = "true" ] && args+=(--dry-run)
-          node scripts/tag-on-merge.js "${args[@]}"
+        uses: $/.github/actions/tag-on-merge
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          dry-run: ${{ inputs.dry-run }}

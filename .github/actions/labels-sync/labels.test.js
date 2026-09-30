@@ -103,13 +103,13 @@ async function main() {
   }
 
   /* ---------- 1c. release 清单和打 tag 那份脚本的常量对得上 ---------- */
-  /* 和 1b 同一个形状。读这三个标签的是本仓自己的 scripts/tag-on-merge.js，
+  /* 和 1b 同一个形状。读这三个标签的是同级的组合动作 tag-on-merge 里那份脚本，
      它按名字认——清单里写成 `release/Major` 之外的任何拼写差异都会让那个 PR
      **静默地按默认 minor 打**（GitHub 对打一个不存在的标签是静默不打，
      作者以为挂上了、其实没挂上）。所以名字必须一个字符都不差，两边只许一处真相。 */
   {
     const rel = readManifest(RELEASE_MANIFEST);
-    const { RELEASE_LABELS } = require("../../../scripts/tag-on-merge.js");
+    const { RELEASE_LABELS } = require("../tag-on-merge/tag-on-merge.js");
     const want = Object.values(RELEASE_LABELS).sort();
     const got = rel.map(l => l.name).sort();
     check(JSON.stringify(got) === JSON.stringify(want),

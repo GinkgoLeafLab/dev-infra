@@ -62,3 +62,4 @@ jobs:
       # **只有真的装了 qa-gate 的仓才给 true。** 给了 true 却没有 qa-gate，
       # 等于在这个仓里建两个没有任何东西在读的标签、还给了它们一份正式定义。
       qa-labels: __QA_LABELS__
+      release-labels: __RELEASE_LABELS__  # 只有装了 tag-on-merge 的仓才有这一行（release/* 三个标签），没装就整行不要

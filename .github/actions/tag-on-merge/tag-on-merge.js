@@ -1,28 +1,31 @@
-/* 合并进 main 之后，自动打下一个 vX.Y.Z tag。
+/* 合并进 main 之后，自动在调用方仓库打下一个 vX.Y.Z tag。
 
-   **这份文件只属于这个仓库自己**（由 `.github/workflows/tag-on-merge.yml` 调），
-   不是给各消费仓的东西——它打的是 dev-infra 自己的版本号，各仓的 caller 钉的就是它。
-   跑法：node scripts/tag-on-merge.js [--dry-run]
+   **这份文件是组合动作 `.github/actions/tag-on-merge` 的一部分，各仓库共用这一份**，
+   通过 `.github/workflows/tag-on-merge.yml` 那个可复用工作流被调到各仓库的 job 里
+   （caller 模板在 adopt/templates/tag-on-merge.yml）。它打的是**调用方仓库**的 tag——
+   在 dev-infra 自己身上，打的就是各仓 caller 里那一行 `uses: …@vX.Y.Z` 钉的版本号。
+   本地跑法（在要打 tag 的那个仓库根下）：node <这份文件> [--dry-run]
 
    ## 它替人做的是哪一步
 
-   README「改这里的东西之后」那三步里的第 2 步：在合并后的 commit 上打一个新 tag。
-   以前这一步是人做的（agent 在会话环境里打 tag 拿 403），漏打、晚打的代价是
-   「先打 tag，再合 caller」那条顺序没人兜着。
+   以前每个仓合并之后都要人手打 tag（agent 在会话环境里打 tag 拿 403），
+   漏打、晚打的代价在 dev-infra 身上最贵：「先打 tag，再合 caller」那条顺序没人兜着。
 
    ## 版本号怎么定
 
-   **默认 minor。** 这不是拍脑袋：v1.1.0 到 v1.18.0 这十八个 tag 全是人手打的，
-   没有一个是 patch 或 major——连纯修 bug、删掉一整个机制的那几次也是 minor。
-   默认值照抄的是这个仓库实际的做法，不是某个工具的默认。
+   **默认 minor。** 这不是拍脑袋：接这条流水线之前，dev-infra 的 v1.1.0~v1.18.0、
+   dev-agents 的 v1.0.0~v1.3.0、dev-standards 的 v1.0.0 全是人手打的，没有一个是
+   patch 或 major——连纯修 bug、删掉一整个机制的那几次也是 minor。
+   默认值照抄的是这几个仓实际的做法，不是某个工具的默认。
 
    要偏离默认，在 PR 上挂**恰好一个**这几个标签（名字见下面 RELEASE_LABELS，
-   清单在 `.github/actions/labels-sync/labels.release.json`）：
+   清单在 `.github/actions/labels-sync/labels.release.json`，由 labels-sync 的
+   `release-labels: true` 建进调用方仓库；**没建之前挂不上，一律按默认 minor 打**）：
 
    | 标签 | 意思 |
    |---|---|
-   | `release/major` | 破坏性变更：各仓照旧升那一行 `uses:` 会坏 |
-   | `release/patch` | 只修 bug，行为契约不变 |
+   | `release/major` | breaking change：各仓照旧升那一行 `uses:` 会坏 |
+   | `release/patch` | 很小的改动：修 bug、措辞，行为契约不变 |
    | `release/skip`  | 这个 PR 单独不值得一个新版本（纯 README 之类） |
 
    **一次运行看的不是「刚合进来的那一个 PR」，而是「上一个 tag 到 main 的 tip 之间
@@ -55,11 +58,14 @@
      /git/refs（只建不改），没有 PATCH、没有 force，由测试钉着
 
    修好之后（改标签、或者人手打一个 tag 越过去），在 Actions 里重跑失败的那一次，
-   或者手动触发一次 tag-on-merge——两者都是重新读 GitHub 上此刻的标签。 */
+   或者手动触发一次 tag-on-merge——两者都是重新读 GitHub 上此刻的标签。
+
+   **只认 main、只认严格的 vX.Y.Z**：一个仓的默认分支不叫 main，或者 tag 是别的形状，
+   这份脚本会出声地判不了（不会猜），接之前先看一眼。 */
 const { execFileSync } = require("child_process");
 
-/* 这条路只认 main：和 tag-on-merge.yml 里 `branches: [main]` 是同一处真相的两半，
-   由测试比对。 */
+/* 这条路只认 main：和 caller 模板（adopt/templates/tag-on-merge.yml）里
+   `branches: [main]` 是同一处真相的两半，由测试比对。 */
 const BRANCH = "main";
 
 const RELEASE_LABELS = {

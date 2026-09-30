@@ -1,4 +1,4 @@
-/* 合并时自动打 tag 的测试：node scripts/tag-on-merge.test.js
+/* 合并时自动打 tag 的测试：node .github/actions/tag-on-merge/tag-on-merge.test.js
 
    这份脚本判错一次的后果是**一个收不回来的版本号**（tag 不移动），或者更糟——
    把一个已有的 tag 挪走，让所有钉着它的 caller 悄悄换了内容。所以这里钉得最重的是：
@@ -19,7 +19,7 @@ const path = require("path");
 
 const T = require("./tag-on-merge.js");
 const SCRIPT = path.join(__dirname, "tag-on-merge.js");
-const ROOT = path.join(__dirname, "..");
+const ROOT = path.join(__dirname, "..", "..", "..");
 
 let pass = 0, fail = 0;
 function check(name, got, want) {
@@ -393,35 +393,59 @@ async function e2e() {
   check("S4 不 git push、不 git tag（建 tag 只走 API 那一条路）", /\bgit\(\s*["'](push|tag)["']/.test(src), false);
 }
 
-/* —— 6. 接线：.github/workflows/tag-on-merge.yml ——
-   每一条漏了都不报错，只是那条路安静地不跑，或者跑了建不出来。 */
+/* —— 6. 接线 ——
+   三份文件三个角色：可复用工作流（checkout 调用方、调组合动作）、组合动作（跑这份脚本）、
+   caller 模板（各仓那一份，形状由 adopt.js 的 lintCaller('tag-on-merge') 体检，那边的
+   变异在 adopt.test.js）。这里只钉**这三份之间对不对得上**——每一处对不上都不报错，
+   只是那条路安静地不跑，或者跑了建不出来。 */
 {
-  const wf = fs.readFileSync(path.join(ROOT, ".github/workflows/tag-on-merge.yml"), "utf8");
-  const body = wf.replace(/^\s*#.*$/gm, "");
-  check("W1 push 触发，而且只认脚本里那一个分支（同一处真相的两半）",
-    (/^  push:\n    branches: \[([^\]]*)\]/m.exec(body) || [])[1], T.BRANCH);
-  check("W2 有 workflow_dispatch（修好标签之后补打用）", /^  workflow_dispatch:/m.test(body), true);
-  check("W3 不许有 paths / paths-ignore（要不要打由标签说了算，不由路径猜）", /paths(-ignore)?:/.test(body), false);
-  check("W4 顶层 permissions: {}", /^permissions: \{\}\s*$/m.test(body), true);
-  const perms = (/^    permissions:\n((?:      .*\n)+)/m.exec(body) || [])[1] || "";
-  check("W5 job 的权限恰好是 contents: write + pull-requests: read",
-    perms.trim().split("\n").map(l => l.replace(/#.*/, "").trim()).sort(), ["contents: write", "pull-requests: read"]);
-  check("W6 并发组存在，而且不取消在跑的那个",
-    /^concurrency:\n  group: tag-on-merge\n  cancel-in-progress: false\s*$/m.test(body), true);
-  check("W7 只在 main 上跑（手动触发可以选别的分支，那样跑的是那个分支上的脚本）",
-    /^    if: github\.ref == 'refs\/heads\/main'\s*$/m.test(body), true);
-  check("W8 checkout 要 fetch-depth: 0（要从上一个 tag 数到 tip）",
-    /uses: actions\/checkout@v\d+\n\s+with:\n\s+fetch-depth: 0/.test(body), true);
-  check("W9 跑的是这份脚本", /node scripts\/tag-on-merge\.js "\$\{args\[@\]\}"/.test(body), true);
-  check("W10 token 给到了脚本", /GITHUB_TOKEN: \$\{\{ github\.token \}\}/.test(body), true);
-  const runBlock = (/^        run: \|\n((?:          .*\n?)+)/m.exec(body) || [])[1] || "";
-  check("W11 正对照：切得出 run 那一段", /node scripts\/tag-on-merge\.js/.test(runBlock), true);
-  check("W11 dry-run 走 env 拼参数，run 的文本里不许插表达式",
-    /DRY_RUN: \$\{\{ inputs\.dry-run \}\}/.test(body) && !/\$\{\{/.test(runBlock), true);
+  const strip = (t) => t.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
+  const wfRaw = fs.readFileSync(path.join(ROOT, ".github/workflows/tag-on-merge.yml"), "utf8");
+  const wf = strip(wfRaw);
+  const actRaw = fs.readFileSync(path.join(__dirname, "action.yml"), "utf8");
+  const act = strip(actRaw);
+  const tpl = strip(fs.readFileSync(path.join(ROOT, "adopt/templates/tag-on-merge.yml"), "utf8"));
+
+  /* 可复用工作流 */
+  check("W1 可复用工作流是 workflow_call，没有自己的触发器", /^on:\n  workflow_call:/m.test(wf) && !/^\s*(push|pull_request\w*|workflow_dispatch):/m.test(wf), true);
+  check("W2 它自己不要权限、不设并发组（权限取自 calling job；同名并发组会和 caller 死锁）",
+    /^\s*(permissions|concurrency):/m.test(wf), false);
+  check("W3 checkout 的是调用方仓库，而且 fetch-depth: 0（要从上一个 tag 数到 tip）",
+    /uses: actions\/checkout@v\d+\n\s+with:\n\s+fetch-depth: 0\n/.test(wf) && !/repository:/.test(wf), true);
+  const refs = [...wf.matchAll(/uses:\s*(\S*tag-on-merge\S*)/g)].map((m) => m[1]);
+  check("W4 正对照：工作流里引用了组合动作 tag-on-merge", refs.length, 1);
+  /* 和 qa-gate.test.js 的 W3 同一个理由：`$/` 解析到这份文件自己所在的仓库、同一个 commit。
+     写成 `./` 会对着工作区解析——而工作区里此刻是**调用方仓库**，那里没有这个动作。 */
+  check("W5 引用必须精确是 `$/.github/actions/tag-on-merge`（不许带 @ref、不许写成 ./）", refs[0], "$/.github/actions/tag-on-merge");
+  check("W6 `$/` 指的那个路径在这个仓库里真的有 action.yml",
+    fs.existsSync(path.join(ROOT, ".github/actions/tag-on-merge/action.yml")), true);
+  check("W7 token 与 dry-run 都往下传了", /token: \$\{\{ secrets\.GITHUB_TOKEN \}\}/.test(wf) && /dry-run: \$\{\{ inputs\.dry-run \}\}/.test(wf), true);
+  check("W8 工作流声明了 dry-run 这个 input（布尔、默认 false）",
+    /^      dry-run:\n(        .*\n)*?        type: boolean\n        default: false/m.test(wf), true);
+
+  /* 组合动作 */
+  check("W9 组合动作确实是 composite", /^\s*using: composite\s*$/m.test(act), true);
+  check("W10 跑的是跟着动作一起下发的这份脚本（$GITHUB_ACTION_PATH），不是调用方工作区里的",
+    /node "\$GITHUB_ACTION_PATH\/tag-on-merge\.js" "\$\{args\[@\]\}"/.test(act), true);
+  check("W11 token 走 input 进 env（组合动作读不到 secrets 上下文）",
+    /GITHUB_TOKEN: \$\{\{ inputs\.token \}\}/.test(act) && !/secrets\./.test(act), true);
+  const runBlock = (/^      run: \|\n((?:        .*\n?)+)/m.exec(act) || [])[1] || "";
+  check("W12 正对照：切得出 run 那一段", /tag-on-merge\.js/.test(runBlock), true);
+  check("W13 dry-run 走 env 拼参数，run 的文本里不许插表达式",
+    /DRY_RUN: \$\{\{ inputs\.dry-run \}\}/.test(act) && !/\$\{\{/.test(runBlock), true);
+  /* labels.test.js 的 L10 讲的是同一件事：这几个字段里 runner 没有 github 上下文，
+     写了表达式会让**所有调用方**一起红。这里 runs: 之前一个表达式都不需要，所以整段禁。 */
+  check("W14 runs: 之前（name / description / inputs）不许有 ${{ }} 表达式",
+    /\$\{\{/.test(actRaw.slice(0, actRaw.indexOf("\nruns:"))), false);
+
+  /* caller 模板：和脚本对得上的那两半 */
+  check("W15 caller 模板只在脚本认的那个分支上触发（同一处真相的两半）",
+    (/^  push:\n    branches: \[([^\]]*)\]/m.exec(tpl) || [])[1], T.BRANCH);
+  check("W16 caller 模板调的是这份可复用工作流", /uses: GinkgoLeafLab\/dev-infra\/\.github\/workflows\/tag-on-merge\.yml@__INFRA_TAG__/.test(tpl), true);
 
   /* 这份测试自己要在 test.yml 里有一步，否则上面这些一条都没人跑 */
   const testYml = fs.readFileSync(path.join(ROOT, ".github/workflows/test.yml"), "utf8");
-  check("W12 test.yml 跑这份测试", /run: node scripts\/tag-on-merge\.test\.js/.test(testYml), true);
+  check("W17 test.yml 跑这份测试", /run: node \.github\/actions\/tag-on-merge\/tag-on-merge\.test\.js/.test(testYml), true);
 }
 
 e2e().then(() => {

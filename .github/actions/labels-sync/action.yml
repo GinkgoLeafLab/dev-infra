@@ -29,8 +29,8 @@ inputs:
   release-labels:
     description: >-
       这个仓要不要 release/major / release/patch / release/skip 三个标签。
-      读它们的是合并时自动打 tag 的那条流水线（今天只有 dev-infra 自己有），
-      **只有装了那条流水线的仓才该给 true**，理由和 qa-labels 同一条。
+      读它们的是 tag-on-merge（合并时自动打 tag），
+      **只有装了它的仓才该给 true**，理由和 qa-labels 同一条。
     required: false
     default: "false"
   apply:

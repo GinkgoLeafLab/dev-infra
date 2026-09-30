@@ -38,6 +38,15 @@ function check(name, got, want) {
    所以不装 qa 门禁、labels-sync 的 `qa-labels` 也必须是 false——给了 true 等于在这个
    仓库里建两个没有任何东西在读的标签。这两半的一致性由 lintCaller 判（传 qa: false）。 */
 const WANT_QA = false;
+
+/* **tag-on-merge 本仓还没接，这是刻意的一步之差，不是漏了。** 本仓的 caller 一律按 tag
+   钉自己（README「这个仓库自己也接着这套东西」），而第一个带 tag-on-merge 本体的 tag
+   要等把它加进来的那个 PR 合并之后才存在——在那之前写 self-tag-on-merge.yml，就是
+   钉一个还不存在的版本（前向引用，v1.1.0 就是这么发坏的）。所以那一个 tag 由人手打，
+   接着一个 PR 同时做三件事：加 self-tag-on-merge.yml、把 self-labels-sync.yml 升到
+   那个 tag 并传 release-labels: true、把这里改成 true 并在 CALLERS 里加上它。
+   这一行的值要和 self-labels-sync.yml 里 release-labels 那一行一致，由 lintCaller 判。 */
+const WANT_TAG = false;
 const CALLERS = {
   "review-gate": ".github/workflows/self-review-gate.yml",
   "labels-sync": ".github/workflows/self-labels-sync.yml",
@@ -48,15 +57,15 @@ const CALLERS = {
    而且不报错」的形状。判据复用各仓共用的那一份。 */
 for (const [kind, file] of Object.entries(CALLERS)) {
   if (!exists(file)) { fail++; console.error(`  ✗ ${file} 不在`); continue; }
-  const { problems } = A.lintCaller(kind, read(file), { qa: WANT_QA });
+  const { problems } = A.lintCaller(kind, read(file), { qa: WANT_QA, release: WANT_TAG });
   check(`${file} 的形状`, problems.join(" / "), "");
 }
 
 /* —— 2. 本体没有被 caller 盖掉 ——
    这是这个仓库独有的失效方式，而且是最贵的那一种：谁在这儿跑了写入模式的 adopt，
    或者照着它那份「不是 pull_request_target」的报告去「修」，改的就是**各仓共用的那一份逻辑**。
-   所以这三个名字必须一直是 `workflow_call`。 */
-for (const f of ["review-gate", "qa-gate", "labels-sync"]) {
+   所以这几个名字必须一直是 `workflow_call`。 */
+for (const f of ["review-gate", "qa-gate", "labels-sync", "tag-on-merge"]) {
   const p = `.github/workflows/${f}.yml`;
   check(`${p} 仍然是可复用工作流本体`, /^\s*workflow_call:/m.test(read(p)), true);
 }

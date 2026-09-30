@@ -1,5 +1,5 @@
 [
-  { "name": "release/major", "color": "b60205", "description": "合并后打的 tag 升 major：破坏性变更，各仓照旧升那一行 uses: 会坏。不挂任何 release/* 就是默认 minor" },
-  { "name": "release/patch", "color": "c2e0c6", "description": "合并后打的 tag 只升 patch：只修 bug，行为契约不变。不挂任何 release/* 就是默认 minor" },
-  { "name": "release/skip", "color": "ededed", "description": "这个 PR 单独不值得一个新版本（纯 README 之类）。它会跟着下一个要打 tag 的 PR 一起进那一版" }
+  { "name": "release/major", "color": "b60205", "description": "breaking change：合并后打的 tag 升 major（各仓照旧升那一行 uses: 会坏）。什么都不挂就是默认 minor" },
+  { "name": "release/patch", "color": "c2e0c6", "description": "很小的改动（修 bug、措辞，不改行为契约）：合并后打的 tag 只升 patch。什么都不挂就是默认 minor" },
+  { "name": "release/skip", "color": "ededed", "description": "这个 PR 单独不值得一个新版本（纯 README 之类）：不打 tag，它跟着下一个要打 tag 的 PR 进那一版" }
 ]

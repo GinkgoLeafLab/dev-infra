@@ -298,26 +298,31 @@ module.exports = function run(A) {
     }
   }
 
-  /* ---------------------------------------------------------------- 6. 三份 caller */
+  /* ---------------------------------------------------------------- 6. 几份 caller */
   const wantQa = o.qa || exists(".github/workflows/qa-gate.yml");
-  for (const kind of ["review-gate", "qa-gate", "labels-sync"]) {
+  const wantTag = o.tagOnMerge || exists(".github/workflows/tag-on-merge.yml");
+  for (const kind of ["review-gate", "qa-gate", "tag-on-merge", "labels-sync"]) {
     const file = ".github/workflows/" + kind + ".yml";
     if (kind === "qa-gate" && !wantQa) {
       say(INFO, "qa-gate", "没装（要装就加 --qa；装了还要把 `qa` 钉成必需检查、并让 labels-sync 传 qa-labels: true）");
+      continue;
+    }
+    if (kind === "tag-on-merge" && !wantTag) {
+      say(INFO, "tag-on-merge", "没装（要合并进 main 后自动打 vX.Y.Z 就加 --tag-on-merge；装了 labels-sync 要传 release-labels: true）");
       continue;
     }
     const got = readIf(file);
     if (got === null) {
       if (o.check) { say(BAD, kind, `${file} 不在`); continue; }
       const tpl = fs.readFileSync(path.join(__dirname, "templates", kind + ".yml"), "utf8");
-      write(abs(file), A.renderCaller(tpl, { tag: infraTag, qa: wantQa }));
+      write(abs(file), A.renderCaller(tpl, { tag: infraTag, qa: wantQa, release: wantTag }));
       say(DID, kind, `写了 ${file}，钉 ${infraTag}`);
       continue;
     }
     /* qa-labels 和「本仓到底装没装 qa-gate」一致不一致，由 lintCaller 判——
        **别在这儿自己判一遍**：这条判定曾经写在这里、拿文件原文 `got` 去 test，
        于是绕开了 lintCaller 里剥注释那一步，一行注释就能把它翻过来（实跑过）。 */
-    const { problems, refs } = A.lintCaller(kind, got, { qa: wantQa });
+    const { problems, refs } = A.lintCaller(kind, got, { qa: wantQa, release: wantTag });
     if (!problems.length) say(OK, kind, `${file}，钉 ${refs.join(" / ")}`);
     else say(BAD, kind, `${file}：\n      - ` + problems.join("\n      - "));
   }
@@ -349,7 +354,9 @@ module.exports = function run(A) {
   2. 必需检查里加 \`review\`${wantQa ? "、`qa`" : ""}（**是被调用方用 API 写出来的那个名字**，
      不是 "review-gate / gate" 那种 job 名，钉错了永远等不到）
   3. 本仓自己的 test 检查也钉成必需（有的话）
-  4. dev-infra 哪天改回私有，还要去它的 Settings → Actions → General → Access 放行本组织`);
+  4. dev-infra 哪天改回私有，还要去它的 Settings → Actions → General → Access 放行本组织${wantTag ? `
+  5. 装了 tag-on-merge：确认没有 tag ruleset 挡着 github-actions 建 vX.Y.Z、组织也没禁止
+     workflow 拿 contents: write——挡着的表现是合并后那一次 tag-on-merge 403 变红、这一版没有 tag` : ""}`);
   if (!o.check) {
     console.log(`\n改动都留在工作区（subtree 那两个提交除外），**脚本不提交也不推送**。
 接下来：看一遍 git diff → 提交 → 开 PR → 让 code-reviewer 评审。
