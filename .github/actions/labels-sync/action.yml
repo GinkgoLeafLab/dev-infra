@@ -26,6 +26,13 @@ inputs:
       等于给两个没有任何东西在读的标签一份正式定义。
     required: false
     default: "false"
+  release-labels:
+    description: >-
+      这个仓要不要 release/major / release/patch / release/skip 三个标签。
+      读它们的是合并时自动打 tag 的那条流水线（今天只有 dev-infra 自己有），
+      **只有装了那条流水线的仓才该给 true**，理由和 qa-labels 同一条。
+    required: false
+    default: "false"
   apply:
     description: "false 只打印计划（dry-run），true 真的建和改"
     required: false
@@ -51,13 +58,16 @@ runs:
         GITHUB_TOKEN: ${{ inputs.token }}
         GITHUB_REPOSITORY: ${{ inputs.repository }}
         QA: ${{ inputs.qa-labels }}
+        RELEASE: ${{ inputs.release-labels }}
         APPLY: ${{ inputs.apply }}
         BASE: ${{ github.action_path }}/labels.json
         QA_MANIFEST: ${{ github.action_path }}/labels.qa.json
+        RELEASE_MANIFEST: ${{ github.action_path }}/labels.release.json
       # 参数拼在 shell 里而不是插进 run 的文本：inputs 是调用方给的字符串，
       # 插进命令行就是注入口子。这个仓库其余每一处都这么写。
       run: |
         args=(--manifest "$BASE")
         [ "$QA" = "true" ] && args+=(--manifest "$QA_MANIFEST")
+        [ "$RELEASE" = "true" ] && args+=(--manifest "$RELEASE_MANIFEST")
         [ "$APPLY" = "true" ] && args+=(--apply)
         node "$GITHUB_ACTION_PATH/labels-sync.js" "${args[@]}"

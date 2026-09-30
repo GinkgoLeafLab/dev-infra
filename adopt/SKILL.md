@@ -96,4 +96,7 @@ commit status 只是「看得见」，不是「拦得住」。脚本最后那张
 | 第二层 subtree | `node vendor/dev-infra/adopt/adopt.js --force --agents-tag <新 tag>`（它替你跑那三步；**不要用 `git subtree pull`**：squash 合并会把 subtree 认路用的那两行尾注一起吞掉） |
 
 上游 dev-infra 自己怎么改、tag 怎么打，见那个仓库的 README「改这里的东西之后」。
-**打 tag 是人做的**，agent 在会话环境里会拿到 403。
+**dev-infra 的 tag 是它合并之后由 `tag-on-merge` 自动打的**；agent 自己手打仍然拿 403。
+所以升 `uses:` / 移指针之前，**先确认你要的那个 tag 真的在上游存在**
+（`git ls-remote --tags https://github.com/GinkgoLeafLab/dev-infra`）——
+那边自动打红了，就是这一版还没有 tag。

@@ -15,6 +15,7 @@
 | `shared/` | **第二层的源文件**：必须躺在各仓里才会被读到的那几份脚本与它们的测试 | 各仓把这个仓库整个当 **git submodule** 挂在 `vendor/dev-infra`，**不再各自落一份本地副本**。`core.hooksPath` 直接指进 `vendor/dev-infra/shared/githooks`；**PreToolUse hook 不直接指进子模块**，它走各仓自己那份 tracked 的 `scripts/guard-hook.js` 转接——子模块可以是空的，而空的时候 `node <缺失路径>` 是「非零退出、stdout 一个字节都没有」，PreToolUse 把它当 non-blocking error、**命令照常执行**（= 守卫静默放行） |
 | `adopt/` | **把一个仓库接上这套东西的脚本 + 那份 Skill**：写三份 caller、挂子模块、下发守卫入口、接 agent 定义的 subtree，以及事后 `--check` 体检同一套接线 | 接入时跑一次；之后每次升级 / 排查再跑 `--check` |
 | `.github/workflows/test.yml` | 本仓自己的测试，连同 `shared/` 里那份套件 | 不适用 |
+| `.github/workflows/tag-on-merge.yml` + `scripts/tag-on-merge.js`（连同它的测试） | **本仓自己的**：PR 合进 main 之后自动打下一个 `vX.Y.Z`——各仓 caller 钉的就是它。见下面「改这里的东西之后」 | 不适用 |
 | `.github/workflows/self-review-gate.yml` / `self-labels-sync.yml`、`scripts/guard-hook.js`、`.claude/`、`package.json` | **这个仓库自己作为消费者的那一侧**（形状和别的仓不一样，见下面那一节） | 不适用 |
 | `self-adopt.test.js` | 钉住上面那一侧的接线——`adopt.js --check` 在这个仓库里判不了，会拒绝跑 | 不适用 |
 | `submodule-shape.test.js` + `.gitattributes` | 钉住「各仓把这里当 submodule 挂上会拿到什么」 | 不适用 |
@@ -223,6 +224,10 @@ commit」——也就是 caller 钉的**同一个** tag 指向的那个 commit�
 按当前钉着的那份清单对回来。**（同理，想定期对偏差就加 `schedule`，
 代价约一分钟 Actions 时间——但它买到的是纠偏，不是追新清单。）
 
+**`release-labels` 是同一个形状的另一组**（`release/major` / `release/patch` /
+`release/skip`，默认 `false`）：读它们的是合并时自动打 tag 的那条流水线，
+今天只有 dev-infra 自己有，见下面「合并时自动打 tag」。别的仓不给它。
+
 **三份 caller 都没有 `contents: read`，也都不该有**——见上面「为什么有组合动作这一层」。
 `permissions` 三份各不相同（`review-gate` / `qa-gate` 要
 `statuses: write` + `pull-requests: write`，`labels-sync` 要 `issues: write`），
@@ -359,15 +364,66 @@ uses: GinkgoLeafLab/dev-infra/.github/workflows/review-gate.yml@main   # ❌
    自引用用的是 `$/`，这一步不用再改它们**——`$/` 自动跟着这个 commit 走，
    没有第二个版本号要在 PR 里对齐（以前按 `@vX.Y.Z` 引用时，那一行写的就是
    「该打哪个 tag」的唯一真相；这一条随着换成 `$/` 一起作废，见上面「为什么有
-   组合动作这一层」）
-2. **在合并后的 commit 上打一个新 tag。** 打哪个版本号是普通的语义化版本判断
-   （这个改动是不是破坏性变更、只是加功能还是纯修 bug），不再从内层引用的哪一行读出来。
-   **这一步是人做的**（agent 在这个环境里打不了 tag，会拿到 403）
+   组合动作这一层」）。**要偏离默认的 minor，在这一步给 PR 挂标签**，见下面那张表
+2. **合并之后 `tag-on-merge` 自动打新 tag**，不用人动手。**去 Actions 里确认那一次
+   运行是绿的、tag 真的出现了**——它红了就是「这一版没有 tag」，见下面「它红了怎么办」
 3. 各仓库把自己 caller 里的 `uses:` 升到新版本，走各自的 PR 与评审
 
 **顺序反了会红一片**：消费仓的 caller 先合、tag 后打，那些 caller 指向一个不存在的
 版本，job 当场失败——而 `pull_request_target` 取默认分支的定义，所以那之后
-**每个 PR 都撞同一件事，包括来修它的那个**。所以永远是**先打 tag，再合 caller**。
+**每个 PR 都撞同一件事，包括来修它的那个**。所以永远是**先有 tag，再合 caller**。
+自动打 tag 让这条顺序多数时候自己成立，但**它不替你检查**：第 2 步红着的时候去合
+第 3 步，结果和以前忘了打 tag 一模一样。
+
+### 合并时自动打 tag（`tag-on-merge`）
+
+`.github/workflows/tag-on-merge.yml` 在每次 push 到 main 时跑（也可以在 Actions 里手动触发，
+带一个 `dry-run` 开关），逻辑在 `scripts/tag-on-merge.js`，由 `scripts/tag-on-merge.test.js`
+钉着（`test.yml` 里一步，PR 上就跑）。**它是本仓自己的流水线，不是给各仓的可复用工作流。**
+
+**版本号：默认 minor，标签覆盖。** 默认 minor 照抄的是这个仓库的实际做法——v1.1.0 到
+v1.18.0 这十八个手打的 tag 全是 minor，连纯修 bug、删掉一整个机制的那几次也是。
+要偏离，在 PR 上挂**恰好一个**：
+
+| 标签 | 打出来的 tag | 什么时候挂 |
+|---|---|---|
+| （不挂） | minor：`v1.18.0` → `v1.19.0` | 绝大多数 PR |
+| `release/major` | `v2.0.0` | 破坏性变更：各仓照旧升那一行 `uses:` 会坏 |
+| `release/patch` | `v1.18.1` | 只修 bug，行为契约不变 |
+| `release/skip` | 不打 | 这个 PR 单独不值得一个新版本（纯 README 之类）；它会跟着下一个要打 tag 的 PR 进那一版 |
+
+**它看的是「上一个 tag 到 main 的 tip」之间合进来的所有 PR，取最高的一级**
+（`skip` 不算级别，全是 `skip` 就不打）。所以某一次运行被并发组挤掉、或者红了，
+下一次运行会把那几个 PR 一起算进来——不会漏、也不会把一个 minor 降成 patch。
+**不按路径猜「纯文档不打」**：`adopt/SKILL.md` 这种 `.md` 是各仓顺着子模块真的会读到的，
+要不要打由人在 PR 上说。
+
+**打在运行那一刻 main 的 tip 上，不是触发这次运行的那个 commit。** `GITHUB_TOKEN`
+给一个不是分支 tip 的 commit 建 tag，只要那个 commit 的 `.github/workflows/` 和 tip
+不一样，就会被拒（它把「建 tag」当成「按那个 commit 的内容创建 workflow 文件」，
+而 `GITHUB_TOKEN` 拿不到 `workflows` 权限）。建的那一刻 tip 又往前走了，它会重新
+fetch、按新 tip 重算一遍再建。
+
+**只建不改。** 它只调 `POST /git/refs`（碰上已存在的 ref 是 422，不会覆盖），
+没有 PATCH、没有 force——tag 不移动是整套「钉 tag」的前提。测试里有一条
+专门钉「源码里不许出现这几样」。
+
+**它红了怎么办**（红 = 这一版没有 tag，**先别去合各仓升 `uses:` 的 PR**）：
+
+| 它说 | 怎么办 |
+|---|---|
+| 某个 PR 同时挂了两个 `release/*` | 去那个（已合并的）PR 上摘掉一个，然后重跑失败的那一次，或者手动触发一次——两者都重新读此刻的标签 |
+| 某个 commit 找不到把它合进来的 PR（直推？） | 判不了它该算哪一级。**人手打一个 tag 越过它**（这仍然只有人做得了，agent 会拿 403），之后的合并照常自动打 |
+| 最新的 `vX.Y.Z` 不在 main 的历史上 | 有人在别的分支上打了 tag，「下一个」无从算起——人来定 |
+| 建 tag 403 | `GITHUB_TOKEN` 没拿到 `contents: write`（组织设置可能压着），或者有一条 tag ruleset 不放 github-actions 过。**那一层是人去仓库 / 组织设置里点的** |
+| 建 tag 422 | 这个版本号这一刻刚被别人建了。不覆盖、不移动——人来看 |
+
+**`release/*` 这三个标签从哪来**：清单是 `.github/actions/labels-sync/labels.release.json`，
+由 labels-sync 的 `release-labels` 这个 input 控制要不要建（**默认 `false`**，和 `qa-labels`
+同一条理由：只有装了读它们的那条流水线的仓才该有）。本仓的 `self-labels-sync.yml`
+要升到**包含这个 input 的那个 tag** 并给 `true` 之后，这三个标签才会真的建出来——
+在那之前它们挂不上（GitHub 对打一个不存在的标签是**静默不打**），**所有合并一律按默认
+minor 打**，和这十八个 tag 的做法一样。
 
 ## `shared/`：第二层的源文件
 
@@ -492,6 +548,7 @@ package.json** 决定模块系统，往上找到的第一份会是消费仓自�
 |---|---|---|---|
 | review-gate caller | `.github/workflows/review-gate.yml` | `.github/workflows/self-review-gate.yml` | 同名会把**本体**盖掉 |
 | labels-sync caller | `.github/workflows/labels-sync.yml` | `.github/workflows/self-labels-sync.yml` | 同上。**它里面那条 `paths:` 也跟着改成了自己的路径**——文件名和那条 `paths:` 是同一处真相的两半，只改一半的表现是「升了版本号、这条流水线根本没触发」，绿的、Actions 里连一条失败记录都没有 |
+| 合并时自动打 tag | 没有 | `.github/workflows/tag-on-merge.yml`（本仓自己的流水线，不是 caller） | 它打的就是各仓钉的那个版本号；别的仓怎么发版不归这儿管 |
 | qa-gate caller | 装了 QA 门禁的仓才有 | **没装** | 本仓的改动由 `test.yml` 那一排自动测试覆盖，没有「要人手点一遍」的东西。所以 `qa-labels` 也必须是 `false`：给 `true` 等于建两个没有任何东西在读的标签 |
 | 第二层的判定逻辑 | submodule `vendor/dev-infra` | **树里的 `shared/`**，不挂子模块 | 挂一个指回自己的子模块，本仓的钩子跑的就是**钉在某个旧 tag 上的那一版守卫**，而不是工作区里正在改的这一版——守卫改坏了本仓自己反而感觉不到，那正是这套东西要消灭的静默失效 |
 | 守卫入口 | `scripts/guard-hook.js` 指进子模块 | 同一份模板，那行 `GUARD` 指 `../shared/guard-branch.js` | 逐字节等于 `renderShim(模板, SELF_GUARD_REL)`，由 `self-adopt.test.js` 钉着。**别手改它**，改模板再重新生成 |
@@ -532,6 +589,6 @@ caller 的形状复用 `lintCaller`、守卫入口复用 `renderShim`、PreToolU
 | `on: workflow_call` 的可复用工作流 | **任何凭据**：token、密钥、`.env`、证书 |
 | 组合动作，以及它们要跑的脚本**和那些脚本的测试** | 只对某一个仓库成立的逻辑——那属于那个仓库 |
 | **`shared/`**：各仓应该完全一致、却必须有本地副本的可执行文本。判据与边界见上一节，**这里不重复一遍**（两处写同一件事必然漂） | |
-| **共享的数据清单**（`labels.json` / `labels.qa.json`）——判据是「各仓应该完全一致」。标签就是这样：名字是跨系统契约（issue 表单、caller 的 `if`、各仓 CLAUDE.md 都按名字引用），各存一份的结果是静默漂开 | **某个仓才需要的那一份数据**。一旦某个仓需要自己的清单，它就不属于这里——`qa-*` 单独一份而不是塞进基础清单，就是这条边界的第一次生效 |
+| **共享的数据清单**（`labels.json` / `labels.qa.json`）——判据是「各仓应该完全一致」。标签就是这样：名字是跨系统契约（issue 表单、caller 的 `if`、各仓 CLAUDE.md 都按名字引用），各存一份的结果是静默漂开 | **某个仓才需要的那一份数据**。一旦某个仓需要自己的清单，它就不属于这里——`qa-*` 单独一份而不是塞进基础清单，就是这条边界的第一次生效（`release/*` 是第二次） |
 | | **只对某一个仓库成立的「事实」**：具体 PR 号当现象引用、某个仓的文件路径、某个仓才有的约定。这里的注释会被所有仓读到，写成「在 X 上实测过」而不是「在这个仓库实测过」 |
 | | issue / PR 模板（那是 `.github` 仓的活，机制完全不同） |

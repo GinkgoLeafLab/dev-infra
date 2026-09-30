@@ -115,6 +115,14 @@ jobs:
         if: always()
         run: node self-adopt.test.js
 
+      # 本仓自己的「合并时自动打 tag」。它判错的后果是**一个收不回来的版本号**
+      # （tag 不移动），或者把已有的 tag 挪走、让所有钉着它的 caller 悄悄换了内容——
+      # 所以它在 PR 上就得跑，不能等到合并那一刻 tag-on-merge.yml 真的去建。
+      # 端到端那一半会在临时目录里真的建 bare 仓库、真的推 commit 和 tag。
+      - name: 合并时自动打 tag
+        if: always()
+        run: node scripts/tag-on-merge.test.js
+
       # 下面跑的是 shared/ 那份源文件自己的测试。
       - name: 分支守卫（shared/）
         if: always()
