@@ -471,8 +471,18 @@ adopt 的 `--check` 会判这两半一致不一致。
 
 **接到「整棵根树被别的仓 subtree 拉走」的仓上**（dev-agents 就是：各仓的
 `.claude/agents/common` 是它的根树）：caller 文件会跟着进每个消费仓的
-`.claude/agents/common/.github/workflows/`。在那儿是惰性的——GitHub 只读仓库根下的
-`.github/workflows`——无害，只是别奇怪它为什么在那儿。
+`.claude/agents/common/.github/workflows/`。**在那儿是惰性的，不影响消费仓自己的任何
+workflow**，逐条对过：
+
+| 谁会看见它 | 会怎样 |
+|---|---|
+| GitHub Actions | 只认仓库根下的 `.github/workflows/`，子目录里的一律不当 workflow——不触发、不和消费仓自己同名的 caller 冲突（workflow 按路径区分） |
+| 消费仓自己 workflow 的 `paths:` 过滤 | `.github/workflows/**` 这类写法是从仓库根锚定的，匹配不到它 |
+| adopt / `--check` | 判的全是仓库根下的固定路径（`.github/workflows/<名字>.yml`、`git grep -- .github/workflows`），不会把它当成本仓装了 tag-on-merge |
+| Claude Code 的 agent 加载 | 只读 `.md`；`.yml` 不是 agent。dev-agents 从 v1.1.0 起就带着一个非角色文件 `docs/方案/…md`，同样一路落进各仓，是先例 |
+| 纯文档判定 | 升 subtree 的 PR 改到它 → 算非文档 → 照常跑测试（`.claude/` 下本来就不算文档） |
+| Dependabot | `directory: "/"` 只扫根下的 `/.github/workflows`，看不见它 |
+| **Renovate（如果哪个仓开了）** | **看得见**：它 github-actions 管理器的默认匹配是 `(^|/)\.github/workflows/…`，嵌套的也认，会提 PR 去升那份副本里的 `uses:`。合了就是本仓改了 subtree 的内容——`--check` 会报「agent 定义和上游对不上」，下次重接原样覆盖。开了 Renovate 的仓给它加 `ignorePaths: [".claude/agents/common/**"]` |
 
 ### 本仓自己什么时候开始自动打
 
@@ -484,7 +494,10 @@ adopt 的 `--check` 会判这两半一致不一致。
 2. 一个 PR 同时做三件事：加 `self-tag-on-merge.yml` 钉那个 tag、把 `self-labels-sync.yml`
    升到那个 tag 并传 `release-labels: true`、把 `self-adopt.test.js` 里的 `WANT_TAG` 改成
    `true` 并把它加进 `CALLERS`。**这个 PR 合并的那一刻，本仓第一次自动打 tag**
-3. dev-agents、dev-standards 等要用的仓同样在那个 tag 存在之后再接
+3. dev-agents、dev-standards 等要用的仓同样在那个 tag 存在之后再接，**两份 caller 一起接**：
+   `tag-on-merge` + `labels-sync`（`release-labels: true`）——只接前者的话 `release/*`
+   三个标签不存在，永远只升 minor。这两个仓不走完整的 adopt（没有门禁、没有 package.json），
+   caller 照 `adopt/templates/` 用 `renderCaller` 渲染、用 `lintCaller` 体检，保证和模板一个字节不差
 
 ## `shared/`：第二层的源文件
 
