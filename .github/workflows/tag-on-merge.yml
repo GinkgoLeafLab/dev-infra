@@ -29,8 +29,8 @@ name: tag-on-merge (reusable)
 #    那样跑的是那个分支上的 caller。
 # 4. `concurrency: { group: tag-on-merge, cancel-in-progress: false }`：两次同时算
 #    会对同一个「下一个版本号」各建一次。**别在这份文件里再写一个同名的组**——
-#    caller 和被调用方撞同一个并发组，GitHub 会判成死锁、把被调用的那个 job 取消
-#    （"Canceling since a deadlock for concurrency group … was detected"）。
+#    caller 和被调用方撞同一个并发组，GitHub 会在启动时判成死锁、直接取消整次运行
+#    （caller 占着那个组，被调用的一方永远等不到它）。
 
 on:
   workflow_call:
