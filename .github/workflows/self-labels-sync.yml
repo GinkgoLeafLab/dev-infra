@@ -3,13 +3,14 @@ name: labels-sync
 # 把共享的标签清单同步成这个仓库的 GitHub 标签。
 #
 # **清单和逻辑都不在这儿**：可复用工作流在 GinkgoLeafLab/dev-infra 的
-# .github/workflows/labels-sync.yml，同步脚本**和两份清单**（labels.json /
-# labels.qa.json）跟着那边的组合动作一起下发到 runner，各仓库共用同一份。
+# .github/workflows/labels-sync.yml，同步脚本**和清单**（基础的 labels.json，以及按需的
+# labels.qa.json / labels.release.json）跟着那边的组合动作一起下发到 runner，各仓库共用同一份。
 # 这份文件是 dev-infra 的 adopt 脚本按模板生成的。
 #
 # 为什么需要它：流程里有一批标签是**机制的组成部分**（issue 分级的
 # bug / enhancement / chore + sev/ + status/，以及放行锁用的 review-passed、
-# review/in-flight，装了 qa-gate 的仓还有 qa-required / qa-passed）。
+# review/in-flight，装了 qa-gate 的仓还有 qa-required / qa-passed，装了 tag-on-merge 的仓
+# 还有 release/major / release/patch / release/skip）。
 # GitHub 对「打一个不存在的标签」的处理是**静默不打**，所以名字差一个字符，
 # agent 那一步就悄悄失败。
 #
