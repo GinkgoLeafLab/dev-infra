@@ -8,7 +8,7 @@
    所以改这里就是改了所有仓——**打了新 tag、各仓把那一行升上去之后**。
 
    用法（组合动作替调用方拼好，本地与测试也可以直接这么调）：
-   node docs-only.js <base-sha> <head-sha> [--merge-base] [--skipped=<描述>]
+   node docs-only.js <base-sha> <head-sha> [--merge-base] [--skipped=<描述>] [--not-docs=<glob 列表>]
 
    **它在调用方的工作区里跑 `git diff`**，所以那个 job 必须先 checkout，
    而且要 `fetch-depth: 0`——浅克隆里 base 那个对象根本不存在。
@@ -18,6 +18,11 @@
    --skipped 只改那条 ::notice:: 里「跳过了什么」的措辞，**判定逻辑不受它影响**。
    哪几条流水线在调它、各自跳过了什么，是各仓自己的事，写在各仓的 CI 文档里；
    这份文件只管判定，不认识任何一条具体的流水线。
+
+   --not-docs 是**调用方声明「这些路径不算文档」**：换行分隔的 glob 列表，命中的文件
+   一律判成「不是文档」，**先于**下面 docs/ 与 .md 两条规则。它只能把判定往「跑测试」
+   那边推，不给它行为一个字节都不变；写法不认识时整个参数按解析失败处理
+   （见 parseNotDocs），方向同样是「跑测试」。这份文件仍然不认识任何一个仓的具体路径。
 
    为什么不用 workflow 级的 paths / paths-ignore：如果这个判定服务的是一个**必需检查**，
    GitHub 官方文档写明「工作流因 path 过滤被跳过时，它的检查会停在 Pending」，
@@ -64,8 +69,21 @@ const { spawnSync } = require("child_process");
    **非 .md 文件**（workflow 定义）、.gitignore ——它们不是文档，
    也不是「绝无可能」的那一档。.github/pull_request_template.md 这类 .md 会被算成文档，
    那是对的：它改了不影响任何断言。 */
-function isDocFile(f) {
+function isDocFile(f, notDocs) {
   if (typeof f !== "string" || f === "") return false;
+  /* 调用方声明的「不算文档」最先判，**在 docs/ 与 .md 两条规则之前**：
+     一个 docs/ 下的、或者 .md 结尾的路径正是它要拦的对象，排在后面就永远轮不到它。
+     notDocs 是 parseNotDocs 的返回值（RegExp 数组）；不给就是老行为，一个字节都不变。
+     **给了但不是那个形状——一律按「不是文档」**：能到这里说明调用方传错了，
+     而传错的参数不许让任何东西被判成文档。 */
+  if (notDocs !== undefined) {
+    if (!Array.isArray(notDocs) || !notDocs.every((r) => r instanceof RegExp)) return false;
+    /* NFC 之后再比：git diff -z 给的是磁盘上的原始字节路径（macOS 上可能是 NFD），
+       而调用方在 YAML 里敲的是 NFC，两边不规范化，同一个名字会互相认不出来。
+       只用来比对 not-docs——下面几条规则全是 ASCII，不受规范化影响。 */
+    const nf = f.normalize("NFC");
+    if (notDocs.some((re) => re.test(nf))) return false;
+  }
   if (f.startsWith("docs/")) return true;
   /* 路径段匹配，不是「开头是不是 .claude/」。理由不在「Claude Code 会不会加载
      子目录里那一份」上——**本仓 README 写着 `.claude/skills/` 只在项目根那一层被扫**，
@@ -78,10 +96,55 @@ function isDocFile(f) {
   return false;
 }
 
+// 把 not-docs 的原文（换行分隔的 glob 列表）解析成 RegExp 数组。
+//
+// 语义只有三条，**别往里加**（每加一种通配写法，就多一种「写了却没命中」的可能）：
+// - `**/` 是零个或多个目录段（`**/矩阵.md` 命中根目录的 `矩阵.md`，也命中 `a/b/矩阵.md`）
+// - `*` 是一段之内的任意个字符，**不跨 `/`**
+// - 其余字符原样匹配，`. ? [ ] { } ( ) + ^ $ | \` 全部转义——`?` 与 `[` 不是通配符
+// 整条模式从头到尾匹配，区分大小写（git 路径就是区分的）。
+// 空行、行首尾的空白（含 CRLF 的 \r）忽略。模式与路径都做 NFC 规范化。
+//
+// **拿不准就抛，由 main 按「跑测试」处理：** 宁可整个参数作废，也不留一条
+// 「写了却永远命不中」的规则——那会让本该被拦下的路径悄悄落回「文档」那一档。
+// 会抛的写法：`**` 不是「一段的开头、后面紧跟 /」的形状（`docs/**`、`a**b`、`***/x`），
+// 以及以 `/` 或 `./` 开头（git 给的路径没有那个前缀，永远命不中）。
+// 传进来不是字符串同样抛。空原文（或全是空行）返回空数组，等价于没传。
+function parseNotDocs(raw) {
+  if (raw === undefined || raw === null) return [];
+  if (typeof raw !== "string") throw new TypeError("not-docs 不是字符串");
+  const out = [];
+  for (const line of raw.split("\n")) {
+    const pat = line.trim().normalize("NFC");
+    if (pat === "") continue;
+    if (pat.startsWith("/") || pat.startsWith("./")) {
+      throw new Error(`not-docs 里的模式不许以 / 或 ./ 开头（git 路径没有那个前缀，永远命不中）：${pat}`);
+    }
+    let src = "";
+    for (let i = 0; i < pat.length; ) {
+      if (pat.startsWith("**", i)) {
+        if ((i !== 0 && pat[i - 1] !== "/") || pat[i + 2] !== "/") {
+          throw new Error(`not-docs 里 ** 只认「**/」这一种写法（一段的开头、后面紧跟 /）：${pat}`);
+        }
+        src += "(?:[^/]+/)*";
+        i += 3;
+      } else if (pat[i] === "*") {
+        src += "[^/]*";
+        i += 1;
+      } else {
+        src += pat[i].replace(/[.*+?^${}()|[\]\\\/]/g, "\\$&");
+        i += 1;
+      }
+    }
+    out.push(new RegExp(`^${src}$`));
+  }
+  return out;
+}
+
 /* 空列表返回 false：一个文件都没变的 diff 说明前提就不对（SHA 取错、强推），
    这时候跑一遍测试是便宜的那一边。 */
-function isDocsOnly(files) {
-  return Array.isArray(files) && files.length > 0 && files.every(isDocFile);
+function isDocsOnly(files, notDocs) {
+  return Array.isArray(files) && files.length > 0 && files.every((f) => isDocFile(f, notDocs));
 }
 
 function git(args, cwd) {
@@ -113,16 +176,25 @@ function main(argv) {
      行为一个字都不变。 */
   const m = flags.map((a) => /^--skipped=(.+)$/.exec(a)).find(Boolean);
   const skipped = m ? m[1] : "npm test";
+  /* --not-docs 的值里有换行与中文，所以不用 /^--x=(.+)$/ 那种（`.` 不匹配换行）。
+     给了几次就并集：多出来的规则只会让更多路径变成「不是文档」，方向是安全的。 */
+  const notDocsRaw = flags.filter((a) => a.startsWith("--not-docs=")).map((a) => a.slice("--not-docs=".length));
 
   let docsOnly = false;
   let why = "";
   try {
+    /* 光秃秃的 --not-docs（漏了 =）会被当成没传——调用方以为声明了、其实没有，
+       这一档正是不许静默的：按解析失败处理。 */
+    if (flags.includes("--not-docs")) throw new Error("--not-docs 后面要带 =<glob 列表>");
+    /* 参数先解析：解析失败整个判定作废，落在下面的 catch 里 → docs_only=false + ::warning::。
+       绝不退回「当没传」——那会把调用方明说不算文档的路径判成文档。 */
+    const notDocs = notDocsRaw.length ? parseNotDocs(notDocsRaw.join("\n")) : undefined;
     if (!base || !head) throw new Error("没给 base/head SHA");
     if (!hasCommit(base, process.cwd())) throw new Error(`base 对象取不到：${base}`);
     if (!hasCommit(head, process.cwd())) throw new Error(`head 对象取不到：${head}`);
     const files = changedFiles(base, head, mergeBase, process.cwd());
-    docsOnly = isDocsOnly(files);
-    const others = files.filter((f) => !isDocFile(f));
+    docsOnly = isDocsOnly(files, notDocs);
+    const others = files.filter((f) => !isDocFile(f, notDocs));
     why = docsOnly
       ? `${files.length} 个改动文件全部是文档`
       : files.length === 0
@@ -155,4 +227,4 @@ if (require.main === module) {
   process.exit(0);
 }
 
-module.exports = { isDocFile, isDocsOnly, changedFiles, main };
+module.exports = { isDocFile, isDocsOnly, parseNotDocs, changedFiles, main };
