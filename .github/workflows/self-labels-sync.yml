@@ -68,8 +68,9 @@ jobs:
     # **清单进了仓库 ≠ 标签已经在 GitHub 上建出来了**：升上去之后这条流水线真的跑过
     # 一次，新标签才存在。好消息是**合并这个 PR 就会跑一次**（上面 push 那条 paths
     # 正好命中本文件）。
-    uses: GinkgoLeafLab/dev-infra/.github/workflows/labels-sync.yml@v1.15.0
+    uses: GinkgoLeafLab/dev-infra/.github/workflows/labels-sync.yml@v1.19.0
     with:
       # **只有真的装了 qa-gate 的仓才给 true。** 给了 true 却没有 qa-gate，
       # 等于在这个仓里建两个没有任何东西在读的标签、还给了它们一份正式定义。
       qa-labels: false
+      release-labels: true  # 只有装了 tag-on-merge 的仓才有这一行（release/* 三个标签），没装就整行不要
