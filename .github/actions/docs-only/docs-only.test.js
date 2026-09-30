@@ -141,11 +141,11 @@ for (const [name, files, want] of CASES) {
    这里选的字符**必须真的会被规范化改变**，否则这几条对着不变的字符串比，
    拿掉规范化也照样绿——先用 sanity 排除这个空跑。
    é：NFC 是一个码位，NFD 是 e + 组合重音符；U+F900 是 CJK 兼容表意字，NFC 之后变成 U+8C48。
-   **两个非 NFC 的值一律写成 \u 转义**：写成字面字符，任何一次编辑器保存或传输做了规范化，
+   **两个非 NFC 的值一律用 String.fromCodePoint 造出来，不写字面字符**：写成字面字符，任何一次编辑器保存或传输做了规范化，
    这几条就退化成「拿两个相同的字符串比」——sanity 会红，但红的原因是文件被改了，不是判定坏了。 */
 const E_NFC = "café";
-const E_NFD = "café";                   // e + U+0301 组合重音符（写成转义：字面字符会被编辑器或传输环节悄悄规范化成 NFC）
-const CJK_COMPAT = "豈";                // U+F900 兼容表意字，NFC 归一成 U+8C48（同上，写成转义）
+const E_NFD = "cafe" + String.fromCodePoint(0x0301);   // e + U+0301 组合重音符
+const CJK_COMPAT = String.fromCodePoint(0xF900);   // U+F900 兼容表意字，NFC 归一成 U+8C48
 check("NFC sanity：é 的两种形式确实不同", E_NFC !== E_NFD, true);
 check("NFC sanity：NFD 规范化之后等于 NFC", E_NFD.normalize("NFC") === E_NFC, true);
 check("NFC sanity：兼容表意字确实会变", CJK_COMPAT.normalize("NFC") !== CJK_COMPAT, true);
