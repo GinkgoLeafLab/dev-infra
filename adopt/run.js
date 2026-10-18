@@ -300,11 +300,16 @@ module.exports = function run(A) {
 
   /* ---------------------------------------------------------------- 6. 几份 caller */
   const wantQa = o.qa || exists(".github/workflows/qa-gate.yml");
+  const wantUi = o.ui || exists(".github/workflows/ui-gate.yml");
   const wantTag = o.tagOnMerge || exists(".github/workflows/tag-on-merge.yml");
-  for (const kind of ["review-gate", "qa-gate", "tag-on-merge", "labels-sync"]) {
+  for (const kind of ["review-gate", "qa-gate", "ui-gate", "tag-on-merge", "labels-sync"]) {
     const file = ".github/workflows/" + kind + ".yml";
     if (kind === "qa-gate" && !wantQa) {
       say(INFO, "qa-gate", "没装（要装就加 --qa；装了还要把 `qa` 钉成必需检查、并让 labels-sync 传 qa-labels: true）");
+      continue;
+    }
+    if (kind === "ui-gate" && !wantUi) {
+      say(INFO, "ui-gate", "没装（要 UI 评审门禁就加 --ui；装了还要把 `ui` 钉成必需检查、并让 labels-sync 传 ui-labels: true）");
       continue;
     }
     if (kind === "tag-on-merge" && !wantTag) {
@@ -315,14 +320,14 @@ module.exports = function run(A) {
     if (got === null) {
       if (o.check) { say(BAD, kind, `${file} 不在`); continue; }
       const tpl = fs.readFileSync(path.join(__dirname, "templates", kind + ".yml"), "utf8");
-      write(abs(file), A.renderCaller(tpl, { tag: infraTag, qa: wantQa, release: wantTag }));
+      write(abs(file), A.renderCaller(tpl, { tag: infraTag, qa: wantQa, release: wantTag, ui: wantUi }));
       say(DID, kind, `写了 ${file}，钉 ${infraTag}`);
       continue;
     }
     /* qa-labels 和「本仓到底装没装 qa-gate」一致不一致，由 lintCaller 判——
        **别在这儿自己判一遍**：这条判定曾经写在这里、拿文件原文 `got` 去 test，
        于是绕开了 lintCaller 里剥注释那一步，一行注释就能把它翻过来（实跑过）。 */
-    const { problems, refs } = A.lintCaller(kind, got, { qa: wantQa, release: wantTag });
+    const { problems, refs } = A.lintCaller(kind, got, { qa: wantQa, release: wantTag, ui: wantUi });
     if (!problems.length) say(OK, kind, `${file}，钉 ${refs.join(" / ")}`);
     else say(BAD, kind, `${file}：\n      - ` + problems.join("\n      - "));
   }
@@ -351,7 +356,7 @@ module.exports = function run(A) {
   console.log("\n" + "—".repeat(60));
   console.log(`第三层（仓库设置）脚本改不了，**人去网页上点**，一条都不能省：
   1. 默认分支的 ruleset：禁止直推、要求 PR
-  2. 必需检查里加 \`review\`${wantQa ? "、`qa`" : ""}（**是被调用方用 API 写出来的那个名字**，
+  2. 必需检查里加 \`review\`${wantQa ? "、`qa`" : ""}${wantUi ? "、`ui`" : ""}（**是被调用方用 API 写出来的那个名字**，
      不是 "review-gate / gate" 那种 job 名，钉错了永远等不到）
   3. 本仓自己的 test 检查也钉成必需（有的话）
   4. dev-infra 哪天改回私有，还要去它的 Settings → Actions → General → Access 放行本组织${wantTag ? `

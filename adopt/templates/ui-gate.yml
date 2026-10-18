@@ -1,0 +1,49 @@
+name: ui-gate
+
+# 把「这个 PR 要不要 UI 评审、这一版过没过」变成一个挂在 PR head SHA 上的必需检查 `ui`。
+#
+# **逻辑不在这儿**：可复用工作流在 GinkgoLeafLab/dev-infra 的
+# .github/workflows/ui-gate.yml。它是 qa-gate 的同形兄弟——判定脚本与组合动作是同一份，
+# 只是标签换成 ui-required / ui-passed、检查名换成 `ui`。这份文件是 dev-infra 的 adopt
+# 脚本按模板生成的。
+#
+# **装了它就要同时做两件事，缺一件这个门就是坏的**：
+#   1. labels-sync 的 caller 里 `ui-labels: true`（否则 ui-required / ui-passed
+#      这两个标签在这个仓库里根本不存在，而 GitHub 对打一个不存在的标签是**静默不打**）
+#   2. 去仓库设置里把 `ui` 钉成必需检查（那一层 agent 改不了，人去网页上点）
+#
+# 和 qa-gate 一样：`ui` 是必需检查而 UI 评审本身可选，所以**每一版都必须报告一次**。
+# 一个不需要 UI 评审的 PR 上也要写 **`success`**，描述写明「未标记需要 UI 评审」，
+# 不是「不报告」（否则那个 PR 永远停在 "Expected — waiting for status"）。
+#
+# 这个 workflow 自己会产生一个 "ui-gate / …" 形状的检查——**那不是必需检查**，
+# ruleset 里要钉的是被调用方用 API 写出来的那个 `ui`，别钉错。
+
+on:
+  # pull_request_target 而不是 pull_request：定义取自默认分支，所以 PR 里改不动这个门。
+  pull_request_target:
+    # **synchronize 一条都不能少**：推了新 commit 就是新 SHA，新 SHA 上必须重新报告一次。
+    # **同理这里不许加 `paths` / `paths-ignore`。**
+    types: [opened, reopened, synchronize, labeled, unlabeled]
+
+permissions: {}
+
+concurrency:
+  group: ui-gate-${{ github.event.pull_request.number }}
+  # 跑到一半被砍会留下「标签摘了但检查没写」，不取消。
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    # 标签事件只认 ui-* 那两个。**这一条是账单前提，不是过滤器**：写在 job 级的 if 上，
+    # 别的标签连 runner 都不会起、不花配额。搬进 dev-infra 那份就变成「起了 runner 再判断」。
+    if: >-
+      (github.event.action != 'labeled' && github.event.action != 'unlabeled')
+      || startsWith(github.event.label.name, 'ui-')
+    # 权限必须在这儿要：被调用方**只能降不能升**。没有 `contents: read`，也不该有——
+    # 这条路上一次 checkout 都不做。
+    permissions:
+      statuses: write       # 写 `ui` 这个 commit status
+      pull-requests: write  # 摘 ui-passed 标签
+    # 按不可变 tag 钉，不按分支。升级 = 改这一行的版本号，而改这一行要在本仓被评审。
+    uses: GinkgoLeafLab/dev-infra/.github/workflows/ui-gate.yml@__INFRA_TAG__

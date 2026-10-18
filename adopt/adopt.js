@@ -80,6 +80,7 @@ const USAGE = `用法：node ${SUBMODULE_PATH}/adopt/adopt.js [选项]
 
   --check              只体检、不写任何东西（受保护分支上也能跑）
   --qa                 同时装 qa-gate caller，并把 labels-sync 的 qa-labels 置 true
+  --ui                 同时装 ui-gate caller（UI 评审门禁，必需检查 \`ui\`），并把 labels-sync 的 ui-labels 置 true
   --tag-on-merge       同时装 tag-on-merge caller（合并进 main 后自动打 vX.Y.Z），
                        并让 labels-sync 传 release-labels: true
   --no-agents          不接 ${AGENTS_PREFIX}（subtree 那条路）
@@ -97,7 +98,7 @@ const USAGE = `用法：node ${SUBMODULE_PATH}/adopt/adopt.js [选项]
 退出码：0 = 一条 ❌ 都没有；1 = 有 ❌（**判不了也算 ❌**，见文件头「失败方向」）。`;
 
 const BOOL_FLAGS = {
-  "--check": "check", "--qa": "qa", "--tag-on-merge": "tagOnMerge", "--no-agents": "noAgents",
+  "--check": "check", "--qa": "qa", "--ui": "ui", "--tag-on-merge": "tagOnMerge", "--no-agents": "noAgents",
   "--no-skill": "noSkill", "--force": "force", "--offline": "offline",
   "--help": "help",
 };
@@ -108,7 +109,7 @@ const VALUE_FLAGS = {
 
 function parseArgs(argv) {
   const o = {
-    check: false, qa: false, tagOnMerge: false, noAgents: false, noSkill: false, force: false,
+    check: false, qa: false, ui: false, tagOnMerge: false, noAgents: false, noSkill: false, force: false,
     offline: false, help: false, infraTag: null, agentsTag: null, repo: null,
     infraUrl: INFRA_URL_DEFAULT, agentsUrl: AGENTS_URL_DEFAULT,
   };
@@ -208,8 +209,11 @@ function assertPinned(text, where) {
 /* `release` 为假时**整行删掉** `release-labels:`，而不是写成 false：那个 input 是
    后来才加的，钉在更早的 tag 上的 caller 传一个被调用方没声明的 input，GitHub 会当场
    拒绝整条流水线（"Invalid input"）。没装 tag-on-merge 的仓不该为它冒这个险。 */
-function renderCaller(tpl, { tag, qa, release = false }) {
+function renderCaller(tpl, { tag, qa, release = false, ui = false }) {
+  /* `ui-labels:` 和 release-labels 同一个处理：没装 ui-gate 就整行删掉，不写 false——
+     它是后来才加的 input，钉在更早的 tag 上的 caller 传一个被调用方没声明的 input 会被整条拒绝。 */
   const out = tpl.replace(/__INFRA_TAG__/g, tag).replace(/__QA_LABELS__/g, qa ? "true" : "false")
+    .replace(/^.*__UI_LABELS__.*\n/gm, (line) => (ui ? line.replace("__UI_LABELS__", "true") : ""))
     .replace(/^.*__RELEASE_LABELS__.*\n/gm, (line) => (release ? line.replace("__RELEASE_LABELS__", "true") : ""));
   assertPinned(out, "渲染出的 caller");
   return out;
@@ -227,7 +231,9 @@ function renderShim(tpl, parts = GUARD_REL) {
 /* caller 的体检。**查的全是「漏了不报错、只是那条路安静地不存在」的东西**：
    少一个事件、少半个 if、少一个权限、钉到会动的名字。查不出本仓自己加的东西，
    那不是这儿的事。 */
-function lintCaller(kind, text, { qa, release } = {}) {
+function lintCaller(kind, text, { qa, release, ui = false } = {}) {
+  /* ui 不给当 false（不像 qa / release 那样抛）：它是后加的可选门，已有的调用点没传它；
+     run.js 永远显式传。 */
   const bad = [];
   /* **先把整行注释剥掉再判**：这些模板的注释里逐字写着 `review-passed`、`synchronize`、
      `@main` 这些词（它们正是在解释那几条），照着原文判会把「注释里提过」当成
@@ -235,7 +241,7 @@ function lintCaller(kind, text, { qa, release } = {}) {
   const code = text.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
   const has = (re) => re.test(code);
   if (!has(/^on:/m)) bad.push("没有 on: 触发器");
-  else if ((kind === "review-gate" || kind === "qa-gate") && !has(/^\s*pull_request_target:/m)) {
+  else if ((kind === "review-gate" || kind === "qa-gate" || kind === "ui-gate") && !has(/^\s*pull_request_target:/m)) {
     bad.push("不是 pull_request_target：定义取自默认分支这条安全地基没了，PR 能改本文件放行自己");
   }
   if (kind === "review-gate") {
@@ -256,6 +262,19 @@ function lintCaller(kind, text, { qa, release } = {}) {
     if (!has(/statuses:\s*write/)) bad.push("少了 statuses: write");
     if (!has(/pull-requests:\s*write/)) bad.push("少了 pull-requests: write");
     if (has(/^\s*paths(-ignore)?:/m)) bad.push("有 paths / paths-ignore：必需检查被 workflow 级过滤跳过就永远 pending");
+  }
+  if (kind === "ui-gate") {
+    /* 和 qa-gate 同形，只是标签前缀与检查名换成 ui。 */
+    for (const t of ["opened", "reopened", "synchronize", "labeled", "unlabeled"]) {
+      if (!has(new RegExp("types:\\s*\\[[^\\]]*" + t))) bad.push(`types 里少了 ${t}：少报告一次 ui，那个 PR 就永远停在 Expected`);
+    }
+    if (!has(/startsWith\(github\.event\.label\.name, 'ui-'\)/)) {
+      bad.push("job 级 if 里没有 ui-* 那条：别的标签事件也会起 runner，账单前提没了");
+    }
+    if (!has(/statuses:\s*write/)) bad.push("少了 statuses: write");
+    if (!has(/pull-requests:\s*write/)) bad.push("少了 pull-requests: write");
+    if (has(/^\s*paths(-ignore)?:/m)) bad.push("有 paths / paths-ignore：必需检查被 workflow 级过滤跳过就永远 pending");
+    if (!has(/uses:\s*GinkgoLeafLab\/dev-infra\/\.github\/workflows\/ui-gate\.yml@/)) bad.push("uses: 指的不是 dev-infra 的 ui-gate.yml（指到 qa-gate.yml 会写出 qa 而不是 ui）");
   }
   if (kind === "tag-on-merge") {
     /* 它是四份里唯一一份 **push 触发**、唯一一份要 `contents` 的：跑在合并之后，
@@ -299,13 +318,19 @@ function lintCaller(kind, text, { qa, release } = {}) {
     if (release === undefined) {
       throw new Error("lintCaller('labels-sync') 必须告诉它本仓装没装 tag-on-merge（{ release: true|false }）");
     }
+    /* ui-labels 同一个形状；ui 不给就当 false（见函数头），这一行同样可以不在。 */
+    if (has(/ui-labels:\s*true/) !== !!ui) {
+      bad.push(ui
+        ? "装了 ui-gate 却没传 ui-labels: true：ui-required / ui-passed 在本仓根本不存在，而 GitHub 对打一个不存在的标签是**静默不打**——ui 门从此形同虚设"
+        : "传了 ui-labels: true 但本仓没有 ui-gate：等于建两个没有任何东西在读的标签");
+    }
     if (has(/release-labels:\s*true/) !== !!release) {
       bad.push(release
         ? "装了 tag-on-merge 却没传 release-labels: true：release/major / release/patch / release/skip 在本仓根本不存在，挂不上——**每一次都静默按默认 minor 打**"
         : "传了 release-labels: true 但本仓没有 tag-on-merge：等于建三个没有任何东西在读的标签");
     }
   }
-  if ((kind === "review-gate" || kind === "qa-gate") && has(/contents:\s*read/)) {
+  if ((kind === "review-gate" || kind === "qa-gate" || kind === "ui-gate") && has(/contents:\s*read/)) {
     bad.push("有 contents: read：这条路上一次 checkout 都不做，给了它说明接线理解错了");
   }
   let refs = [];

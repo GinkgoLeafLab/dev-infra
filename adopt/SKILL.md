@@ -17,7 +17,7 @@ git switch -c chore/接入共享基础设施          # 必须在特性分支上
 
 # 全新仓库：先把脚本弄到盘上（它自己会把子模块挂好、钉在最新 tag 上）
 git clone --depth 1 https://github.com/GinkgoLeafLab/dev-infra /tmp/dev-infra
-node /tmp/dev-infra/adopt/adopt.js            # 要装 QA 门禁就加 --qa；要合并时自动打 tag 就加 --tag-on-merge
+node /tmp/dev-infra/adopt/adopt.js            # 要装 QA 门禁就加 --qa；要 UI 评审门禁就加 --ui；要合并时自动打 tag 就加 --tag-on-merge
 
 # 已经接过的仓库（体检 / 补齐 / 升级）：用自己那份，它就在子模块里
 node vendor/dev-infra/adopt/adopt.js --check  # 只体检，一个字节都不写
@@ -40,11 +40,11 @@ node vendor/dev-infra/adopt/adopt.js --check  # 只体检，一个字节都不�
 
 | 层 | 装什么 | 怎么进来 | 谁能动 |
 |---|---|---|---|
-| 第一层 | `review-gate` / `labels-sync` 两份 caller，要的话再加 `qa-gate`（`--qa`）/ `tag-on-merge`（`--tag-on-merge`），`docs-only` 那个步骤 | 各 workflow 里一行 `uses: …@vX.Y.Z` | 脚本写，人评审 |
+| 第一层 | `review-gate` / `labels-sync` 两份 caller，要的话再加 `qa-gate`（`--qa`）/ `ui-gate`（`--ui`）/ `tag-on-merge`（`--tag-on-merge`），`docs-only` 那个步骤 | 各 workflow 里一行 `uses: …@vX.Y.Z` | 脚本写，人评审 |
 | 第二层 | 分支守卫、git 钩子、`setup-hooks.js`（submodule）+ agent 角色定义（subtree） | `vendor/dev-infra` 挂 submodule；`.claude/agents/common` 走 subtree | 脚本写，人评审 |
 | **第三层** | **仓库设置**：ruleset、必需检查、Environment 凭据 | **人去网页上点** | **agent 改不了，脚本也不会假装它做了** |
 
-**第三层没做完，前两层等于没装**：`review` / `qa` 不是必需检查时，那两个门写出来的
+**第三层没做完，前两层等于没装**：`review` / `qa` / `ui` 不是必需检查时，那两个门写出来的
 commit status 只是「看得见」，不是「拦得住」。脚本最后那张清单就是这一层，逐条点完。
 
 ## 报告里每一条 ❌ 怎么办
@@ -59,6 +59,8 @@ commit status 只是「看得见」，不是「拦得住」。脚本最后那张
 | **caller 少了 `synchronize` / 少半个 `if`** | 那条路永远不跑，而且不报错。按脚本重写那份 caller（`--force`），或照它说的补 |
 | **钉到 `@main` / `@v1`** | 等于上游一次未经本仓评审的改动当场在这里生效。钉三段式 tag |
 | **`qa-labels` 和有没有 qa-gate 对不上** | 给了 `true` 却没 qa-gate = 建两个没人读的标签；有 qa-gate 却没给 = 那两个标签在本仓根本不存在，而 GitHub 对打一个不存在的标签是**静默不打**，QA 那条路从此形同虚设 |
+| **`ui-labels` 和有没有 ui-gate 对不上** | 同 `qa-labels`：装了 ui-gate 却没给 `ui-labels: true` = `ui-required` / `ui-passed` 在本仓根本不存在，静默不打，ui 门形同虚设；没装却给了 = 建两个没人读的标签。没装的仓里那一行整行不写 |
+| **ui-gate caller 指到了 `qa-gate.yml`** | 会在本仓写出 `qa` 而不是 `ui`，`ui` 永远停在 Expected。照模板重写（`--force`） |
 | **`release-labels` 和有没有 tag-on-merge 对不上** | 装了 tag-on-merge 却没给 `release-labels: true` = `release/major` / `release/patch` / `release/skip` 在本仓根本不存在，PR 上挂不上，**每一次都静默按默认 minor 打**；没装却给了 = 建三个没人读的标签。没装的仓里**那一行整行不写**，不是写成 `false` |
 | **tag-on-merge 没把 dry-run 按 `== true` 传下去** | 手动触发时勾了 dry-run，它照样真的建 tag——一个收不回来的版本号。照模板写 `dry-run: ${{ inputs.dry-run == true }}` |
 | **tag-on-merge 不是 push 到 main / 加了 paths / 少了只认 main 的 if** | 合并后不跑、按路径漏打、或者手动触发选了别的分支也去建 tag。照模板重写（`--force`） |

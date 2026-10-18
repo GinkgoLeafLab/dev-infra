@@ -28,6 +28,7 @@ function check(cond, msg) {
 
 const REPO = "GinkgoLeafLab/does-not-matter";
 const QA_MANIFEST = path.join(__dirname, "labels.qa.json");
+const UI_MANIFEST = path.join(__dirname, "labels.ui.json");
 const RELEASE_MANIFEST = path.join(__dirname, "labels.release.json");
 
 /** 起一个假 API。handler 拿到 (req, body) 返回 [状态码, 响应体字符串]。 */
@@ -81,6 +82,8 @@ async function main() {
 
     /* **基础清单里不许有 qa-***。它们是能力差异不是措辞差异：
        建到一个没有 qa-gate 的仓里，等于给两个没有任何东西在读的标签一份正式定义。 */
+    check(![...names].some(n => n.startsWith("ui-")),
+      "ui-* 不许进基础清单——它们只属于真的装了 ui-gate 的仓，见 labels.ui.json");
     check(!names.has("qa-required") && !names.has("qa-passed"),
       "qa-* 不许进基础清单——它们只属于真的装了 qa-gate 的仓，见 labels.qa.json");
     /* release/* 同理：读它们的是合并时自动打 tag 的那条流水线，没装它的仓不该有。 */
@@ -100,6 +103,20 @@ async function main() {
     check(qa.length === 2, `qa 清单恰好两条，实际 ${qa.length}`);
     check(names.has(REQUIRED_LABEL), `qa 清单里缺 ${REQUIRED_LABEL}（qa-gate.js 认的就是这个名字）`);
     check(names.has(PASSED_LABEL), `qa 清单里缺 ${PASSED_LABEL}（qa-gate.js 认的就是这个名字）`);
+  }
+
+  /* ---------- 1b'. ui 清单和 qa-gate.js 里 ui 那道门的常量对得上 ---------- */
+  /* 和 1b 同一个形状：名字差一个字符，GitHub 就静默不打标签，ui 门从此形同虚设。
+     字面量也钉死一遍——只比常量的话，两边一起改错是全绿的。 */
+  {
+    const ui = readManifest(UI_MANIFEST);
+    const { GATES } = require("../qa-gate/qa-gate.js");
+    const names = ui.map(l => l.name).sort();
+    check(JSON.stringify(names) === JSON.stringify([GATES.ui.passed, GATES.ui.required].sort()),
+      `ui 清单必须恰好是 qa-gate.js 里 ui 门认的两个名字，实际 ${names.join("、")}`);
+    check(JSON.stringify(names) === JSON.stringify(["ui-passed", "ui-required"]), "ui 清单的字面量是 ui-passed / ui-required");
+    const qaNames = new Set(readManifest(QA_MANIFEST).map(l => l.name));
+    check(names.every(n => !qaNames.has(n)), "ui 清单和 qa 清单不许重名");
   }
 
   /* ---------- 1c. release 清单和打 tag 那份脚本的常量对得上 ---------- */
@@ -314,6 +331,9 @@ async function main() {
     let threw3 = false;
     try { readManifests([BASE_MANIFEST, QA_MANIFEST, RELEASE_MANIFEST]); } catch (e) { threw3 = true; }
     check(!threw3, "基础 + qa + release 三份拼在一起必须合法（没有跨文件重名）");
+    let threw4 = false;
+    try { readManifests([BASE_MANIFEST, QA_MANIFEST, UI_MANIFEST, RELEASE_MANIFEST]); } catch (e) { threw4 = true; }
+    check(!threw4, "基础 + qa + ui + release 四份拼在一起必须合法（没有跨文件重名）");
 
     /* **跨文件重名要红。** 这是这个机制唯一会静默出错的地方：两份清单撞了同一个
        标签名，后来者悄悄覆盖前者、而两份都「各自合法」。靠的是「拼完再整体校验」，
@@ -390,6 +410,7 @@ async function main() {
        漏了任何一环都不报错：工作流不传，组合动作拿到默认的 "false"，那组标签安静地
        从来没建过；dry-run 那步传了、同步那步没传，计划里有、实际没有。 */
     for (const [input, env, file] of [["qa-labels", "QA", "labels.qa.json"],
+                                      ["ui-labels", "UI", "labels.ui.json"],
                                       ["release-labels", "RELEASE", "labels.release.json"]]) {
       const esc = input.replace(/-/g, "\\-");
       check(new RegExp("^  " + esc + ":\\s*$", "m").test(act), `L11 action.yml 声明了 input ${input}`);

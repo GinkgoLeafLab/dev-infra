@@ -68,6 +68,12 @@ jobs:
       - name: QA 门禁判定
         run: node .github/actions/qa-gate/qa-gate.test.js
 
+      # ui 门和 qa 门共用同一份判定脚本（GATES 表选标签名与描述），这一条验的是
+      # 「选对了门」：ui 的结论不冒出 qa、qa 那一路没被碰、ui-gate.yml 带着 `gate: ui`。
+      - name: UI 评审门禁判定
+        if: always()
+        run: node .github/actions/qa-gate/ui-gate.test.js
+
       - name: 标签同步
         if: always()
         run: node .github/actions/labels-sync/labels.test.js

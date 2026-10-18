@@ -83,17 +83,17 @@ check("isImmutableTag 不认 v1", A.isImmutableTag("v1"), false);
 }
 
 /* —— caller 体检：先在自家模板上必须全绿 —— */
-for (const kind of ["review-gate", "qa-gate", "labels-sync", "tag-on-merge"]) {
-  for (const release of [true, false]) {
-    const text = A.renderCaller(TPL(kind), { tag: "v1.14.0", qa: true, release });
-    const { problems } = A.lintCaller(kind, text, { qa: true, release });
-    check(`${kind} 模板自己过体检（release=${release}）`, problems.join(" | "), "");
+for (const kind of ["review-gate", "qa-gate", "ui-gate", "labels-sync", "tag-on-merge"]) {
+  for (const release of [true, false]) for (const ui of [true, false]) {
+    const text = A.renderCaller(TPL(kind), { tag: "v1.14.0", qa: true, release, ui });
+    const { problems } = A.lintCaller(kind, text, { qa: true, release, ui });
+    check(`${kind} 模板自己过体检（release=${release} ui=${ui}）`, problems.join(" | "), "");
   }
 }
 
 /* —— 然后每一条都要真的判得出来（变异） —— */
-function lint(kind, mutate, tag = "v1.14.0", qa = true, release = true) {
-  return A.lintCaller(kind, mutate(A.renderCaller(TPL(kind), { tag, qa, release })), { qa, release }).problems.join(" | ");
+function lint(kind, mutate, tag = "v1.14.0", qa = true, release = true, ui = true) {
+  return A.lintCaller(kind, mutate(A.renderCaller(TPL(kind), { tag, qa, release, ui })), { qa, release, ui }).problems.join(" | ");
 }
 check("types 里少了 synchronize 判得出来",
   /synchronize/.test(lint("review-gate", (t) => t.replace("types: [labeled, synchronize]", "types: [labeled]"))), true);
@@ -109,6 +109,20 @@ check("qa-gate 少一个事件判得出来",
   /unlabeled/.test(lint("qa-gate", (t) => t.replace(", unlabeled]", "]"))), true);
 check("qa-gate 加了 paths 判得出来",
   /paths/.test(lint("qa-gate", (t) => t.replace("permissions: {}", "permissions: {}\n    paths:\n      - src/**"))), true);
+/* ui-gate：和 qa-gate 同形的每一条都要真的判得出来，外加「指错了可复用工作流」这一条
+   ——ui-gate caller 误指 qa-gate.yml，会在本仓写出 `qa` 而不是 `ui`。 */
+check("ui-gate 少一个事件判得出来",
+  /unlabeled/.test(lint("ui-gate", (t) => t.replace(", unlabeled]", "]"))), true);
+check("ui-gate 加了 paths 判得出来",
+  /paths/.test(lint("ui-gate", (t) => t.replace("permissions: {}", "permissions: {}\n    paths:\n      - src/**"))), true);
+check("ui-gate job 级 if 少了 ui- 前缀判得出来",
+  /ui-\*/.test(lint("ui-gate", (t) => t.replace("'ui-'", "'qa-'"))), true);
+check("ui-gate 不是 pull_request_target 判得出来",
+  /pull_request_target/.test(lint("ui-gate", (t) => t.replace("pull_request_target:", "pull_request:"))), true);
+check("ui-gate 加了 contents: read 判得出来",
+  /contents: read/.test(lint("ui-gate", (t) => t.replace("statuses: write", "contents: read\n      statuses: write"))), true);
+check("ui-gate 误指 qa-gate.yml 判得出来",
+  /ui-gate\.yml/.test(lint("ui-gate", (t) => t.replace("workflows/ui-gate.yml@", "workflows/qa-gate.yml@"))), true);
 check("给 caller 加 contents: read 判得出来",
   /contents: read/.test(lint("qa-gate", (t) => t.replace("statuses: write", "contents: read\n      statuses: write"))), true);
 check("labels-sync 抄了隔壁的 statuses 判得出来",
@@ -182,6 +196,25 @@ check("同一份文件在没装 qa-gate 的仓里是对的，不许因为那行�
     A.renderCaller(TPL("labels-sync"), { tag: "v1.14.0", qa: false })
       .replace(/^(\s+)qa-labels: false$/m, "$1# 升级时记得把 qa-labels: true 打开\n$1qa-labels: false"),
     { qa: false, release: false }).problems.join(" | "), "");
+
+/* ui-labels 同一个形状，两个方向 + 注释里出现 true 不算数。 */
+{
+  const uiText = (ui) => A.renderCaller(TPL("labels-sync"), { tag: "v1.14.0", qa: false, ui });
+  check("没装 ui-gate：labels-sync 里一个 ui-labels 都没有", /ui-labels/.test(uiText(false)), false);
+  check("装了 ui-gate：ui-labels: true", /^\s+ui-labels: true\b/m.test(uiText(true)), true);
+  check("装了 ui-gate 却没传 ui-labels: true 判得出来",
+    /装了 ui-gate 却没传/.test(A.lintCaller("labels-sync", uiText(false), { qa: false, release: false, ui: true }).problems.join(" | ")), true);
+  check("传了 ui-labels: true 但没装 ui-gate 判得出来",
+    /没有 ui-gate/.test(A.lintCaller("labels-sync", uiText(true), { qa: false, release: false, ui: false }).problems.join(" | ")), true);
+  check("ui-labels 只在注释里为 true 时不算本仓传了 true",
+    /装了 ui-gate 却没传/.test(A.lintCaller("labels-sync",
+      uiText(false).replace(/^(\s+)qa-labels: false$/m, "$1# 装了 ui-gate 后加 ui-labels: true\n$1qa-labels: false"),
+      { qa: false, release: false, ui: true }).problems.join(" | ")), true);
+  check("正对照：装了且传了 → 无问题",
+    A.lintCaller("labels-sync", uiText(true), { qa: false, release: false, ui: true }).problems.join(" | "), "");
+  check("没装 ui-gate 时，其余部分一个字节不变（只少这一行）",
+    uiText(true).split("\n").filter((l) => !/ui-labels/.test(l)).join("\n"), uiText(false));
+}
 
 /* 不告诉它本仓装没装 qa-gate 就抛：**静默少一条判定**正是上面那个洞的形状。 */
 throws("labels-sync 不给 qa 就抛", () => A.lintCaller("labels-sync", A.renderCaller(TPL("labels-sync"), { tag: "v1.14.0", qa: true })), /必须告诉它/);
@@ -375,7 +408,7 @@ function e2e(variant, consumerPkg, wantShim, deep, withTag) {
     check(`${variant}：而且是在写任何东西之前拒绝的`, fs.existsSync(path.join(repo, ".github/workflows/review-gate.yml")), false);
 
     /* 接入 */
-    const run1 = node(repo, [...base, "--qa", ...(withTag ? ["--tag-on-merge"] : [])]);
+    const run1 = node(repo, [...base, "--qa", "--ui", ...(withTag ? ["--tag-on-merge"] : [])]);
     check(`${variant}：接入跑成` + (run1.ok ? "" : `（${run1.out.split("\n").filter((l) => /❌/.test(l)).join(" / ")}）`), run1.ok, true);
 
     /* 读不到就返回空串，**不抛**：一条断言失败不该把后面所有断言连跑的机会都拿走
@@ -386,6 +419,9 @@ function e2e(variant, consumerPkg, wantShim, deep, withTag) {
     check(`${variant}：写了 review-gate caller`, /@v9\.9\.0\s*$/m.test(read(".github/workflows/review-gate.yml")), true);
     check(`${variant}：写了 qa-gate caller`, has(".github/workflows/qa-gate.yml"), true);
     check(`${variant}：qa-labels 跟着 --qa 置 true`, /qa-labels:\s*true/.test(read(".github/workflows/labels-sync.yml")), true);
+    check(`${variant}：写了 ui-gate caller，钉在那个 tag 上、指的是 ui-gate.yml`,
+      /workflows\/ui-gate\.yml@v9\.9\.0\s*$/m.test(read(".github/workflows/ui-gate.yml")), true);
+    check(`${variant}：ui-labels 跟着 --ui 置 true`, /^\s+ui-labels: true\b/m.test(read(".github/workflows/labels-sync.yml")), true);
     check(`${variant}：tag-on-merge caller ${withTag ? "写了、钉在那个 tag 上" : "没给 --tag-on-merge 就不写"}`,
       withTag ? /tag-on-merge\.yml@v9\.9\.0\s*$/m.test(read(".github/workflows/tag-on-merge.yml")) : !has(".github/workflows/tag-on-merge.yml"), true);
     check(`${variant}：release-labels ${withTag ? "跟着 --tag-on-merge 置 true" : "整行不在"}`,

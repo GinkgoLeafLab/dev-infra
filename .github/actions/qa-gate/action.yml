@@ -1,5 +1,5 @@
 name: qa-gate decide
-description: 把 PR 上的 qa-* 标签翻译成一个挂在 head SHA 上的 commit status 请求体
+description: 把 PR 上的 qa-* 或 ui-* 标签（由 gate 输入选）翻译成一个挂在 head SHA 上的 commit status 请求体
 
 # 这个组合动作只做**判定**，不写检查、不摘标签——那两件事留在
 # .github/workflows/qa-gate.yml 里，理由在那份文件顶部（`always()` 的语义与
@@ -19,6 +19,14 @@ description: 把 PR 上的 qa-* 标签翻译成一个挂在 head SHA 上的 comm
 # "You can share an action or reusable workflow with your organization without
 # publishing the action or workflow publicly."——**动作和可复用工作流共用同一个开关**，
 # 所以不需要再为它单独配 PAT。
+
+# **一个动作两道门**：`gate` 选哪一套标签名与描述（qa / ui），判定逻辑只有 qa-gate.js 一份。
+# 默认 qa——已有的调用方（qa-gate.yml）不传它，行为与改造前逐字相同。
+inputs:
+  gate:
+    description: 哪道门，qa 或 ui。认不得的名字判定脚本会抛（拦住，不是退回 qa）
+    required: false
+    default: qa
 
 outputs:
   body_path:
@@ -52,6 +60,7 @@ runs:
     - id: decide
       shell: bash
       env:
+        QA_GATE_NAME: ${{ inputs.gate }}
         QA_GATE_SHA: ${{ github.event.pull_request.head.sha }}
         QA_GATE_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
         QA_GATE_EVENT: ${{ github.event.action }}

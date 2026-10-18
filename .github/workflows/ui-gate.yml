@@ -1,0 +1,59 @@
+name: ui-gate (reusable)
+
+# 把「这个 PR 要不要 UI 评审、这一版过没过」变成一个挂在 PR head SHA 上的必需检查 `ui`。
+# 各仓库只留一个二十来行的 caller，逻辑只有这一份。
+#
+# **这是 qa-gate.yml 的同形兄弟，不是新机制**：判定脚本与组合动作就是 qa-gate 那一份，
+# 只是 `gate: ui` 把标签名换成 ui-required / ui-passed、把 context 换成 `ui`、
+# 描述换成 UI 评审的措辞。为什么参数化而不是复制、备选与代价见
+# docs/方案/2026-10-ui-gate.md。其余全部与 qa-gate.yml 一致，那份文件顶部的长注释
+# （为什么每一版都要报告、为什么 permissions/if/on 必须留在 caller、为什么是 commit status
+# 不是 check run、为什么不许 checkout）在这里逐条同样成立，不再抄第二份。
+#
+# 要点速记（细节去 qa-gate.yml）：
+#   1. caller 的 `on:` 是 pull_request_target，types 含
+#      [opened, reopened, synchronize, labeled, unlabeled]，不许加 paths / paths-ignore
+#   2. caller 的 job 级 `if:`：非标签事件放行，标签事件只认 `ui-` 前缀（账单前提，不许搬走）
+#   3. caller 的 permissions: { statuses: write, pull-requests: write }，没有 contents
+#
+# 这个 workflow 自己的 job 显示名不是必需检查，ruleset 里要钉的是 API 写出来的 `ui`。
+
+on:
+  workflow_call:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # permissions 不写在这儿，见上面第 3 条。
+    steps:
+      # 同仓自引用 `$/`：不带 `@{ref}`、不是 `./`（理由逐条见 qa-gate.yml 同一位置）。
+      # 复用 qa-gate 这个动作，只是选 ui 这道门。**`gate: ui` 不能漏**：漏了动作按默认
+      # 走 qa，会在消费仓的 head SHA 上写出一个 `qa`（ui-gate.test.js 钉着这一行）。
+      - id: gate
+        uses: $/.github/actions/qa-gate
+        with:
+          gate: ui
+
+      # 钉死 head.sha（脚本里已经写进请求体了）。写的是 commit status 不是 check run，
+      # 实测依据与「别改回去」见 qa-gate.yml 同一位置。
+      - name: 在 head SHA 上写 ui commit status
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          BODY: ${{ steps.gate.outputs.body_path }}
+        run: gh api "repos/$REPO/statuses/$SHA" --input "$BODY"
+
+      # ui-passed 是一次性信号不是状态：用掉就摘，留着它下一版代码上会假装「已经评审过了」。
+      # **ui-required 不摘**：那是「这个 PR 属于要评审的那一类」这个事实，不随版本变。
+      # always()：写检查失败也摘（失败时 job 是红的、看得见，重新打一次标签就是重试）。
+      # 这一步留在 job 里不搬进动作的取舍见 qa-gate.yml 同一位置。
+      - name: 摘掉 ui-passed
+        if: always() && steps.gate.outputs.remove_label != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          LABEL: ${{ steps.gate.outputs.remove_label }}
+        run: gh api -X DELETE "repos/$REPO/issues/$PR/labels/$LABEL"
