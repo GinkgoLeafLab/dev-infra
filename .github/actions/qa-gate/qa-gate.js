@@ -24,8 +24,44 @@
    抛出去 job 就是红的，那个 SHA 上不会有 `qa` 检查，PR 停在
    "Expected — waiting for status" 上——**拦住，不是放行**。 */
 
-const REQUIRED_LABEL = "qa-required";
-const PASSED_LABEL = "qa-passed";
+/* **一份判定，两道门（qa、ui）。** `GATES` 是唯一的差异表：门名（= commit status 的
+   context，必需检查按它匹配）、两个标签名、四句描述。判定逻辑本身只有下面这一份，
+   所以 ui 门继承了 qa 门全部的防过期快照断言，而不是另抄一份再各自漂。
+   **qa 那一行的字符串与改造前逐字相同**（qa-gate.test.js 钉着字面量），
+   默认参数都落在 qa 上——已有的消费仓、已有的调用点一个字节都不用改。
+   方案见 docs/方案/2026-10-ui-gate.md。 */
+const GATES = {
+  qa: {
+    name: "qa",
+    required: "qa-required",
+    passed: "qa-passed",
+    stale: (g) => `\`${g.passed}\` 不是这个事件打上的，这一版没人测过`,
+    skip: (g) => `没有 \`${g.required}\`，跳过 QA`,
+    pass: () => "qa-tester 判这一版通过",
+    wait: (g) => `标了 \`${g.required}\`，但这一版还没通过 QA`,
+  },
+  ui: {
+    name: "ui",
+    required: "ui-required",
+    passed: "ui-passed",
+    stale: (g) => `\`${g.passed}\` 不是这个事件打上的，这一版没过 UI 评审`,
+    skip: (g) => `未标记需要 UI 评审（没有 \`${g.required}\`）`,
+    pass: () => "ui-reviewer 判这一版 UI 评审通过",
+    wait: (g) => `标了 \`${g.required}\`，但这一版还没通过 UI 评审`,
+  },
+};
+
+/* 认不得的门名一律抛：悄悄退回 qa 会让一条 ui 的接线错误在 `qa` 上写出结论。 */
+function gateFor(name) {
+  if (!Object.prototype.hasOwnProperty.call(GATES, name)) {
+    throw new Error(`门名不认得：${JSON.stringify(name)}（认得的：${Object.keys(GATES).join(" / ")}）`);
+  }
+  return GATES[name];
+}
+
+/* 下面两个导出常量是 qa 门的，保持原名原值（qa-gate.test.js、labels.test.js 在读）。 */
+const REQUIRED_LABEL = GATES.qa.required;
+const PASSED_LABEL = GATES.qa.passed;
 
 /* 认得的 pull_request_target 事件。**不在这张表里就抛**——多一个触发类型时 job 会当场红，
    而不是悄悄按「不是 synchronize」处理，那正好是下面那个竞态要防的方向。 */
@@ -36,7 +72,8 @@ const ACTIONS = ["opened", "reopened", "synchronize", "labeled", "unlabeled"];
    的两态——**判断留三态是刻意的**，「免测」和「通过」都绿，但它们不是一回事。
    removeLabel 非空时，workflow 写完检查要把它摘掉——标签是一次性信号不是状态，
    留着它会在下一版代码上假装「已经测过了」。 */
-function decide(labels, action, label) {
+function decide(labels, action, label, gate = GATES.qa) {
+  const REQUIRED_LABEL = gate.required, PASSED_LABEL = gate.passed;
   const has = (name) => labels.includes(name);
 
   /* **只有「这个事件本身就是在打 `qa-passed`」时才认那个标签。** 其余一律当过期。
@@ -66,9 +103,7 @@ function decide(labels, action, label) {
   if (has(PASSED_LABEL) && !fresh) {
     return {
       conclusion: has(REQUIRED_LABEL) ? "failure" : "neutral",
-      desc: has(REQUIRED_LABEL)
-        ? `\`${PASSED_LABEL}\` 不是这个事件打上的，这一版没人测过`
-        : `没有 \`${REQUIRED_LABEL}\`，跳过 QA`,
+      desc: has(REQUIRED_LABEL) ? gate.stale(gate) : gate.skip(gate),
       removeLabel: null,
     };
   }
@@ -77,20 +112,20 @@ function decide(labels, action, label) {
   if (fresh) {
     return {
       conclusion: "success",
-      desc: "qa-tester 判这一版通过",
+      desc: gate.pass(gate),
       removeLabel: PASSED_LABEL,
     };
   }
   if (has(REQUIRED_LABEL)) {
     return {
       conclusion: "failure",
-      desc: `标了 \`${REQUIRED_LABEL}\`，但这一版还没通过 QA`,
+      desc: gate.wait(gate),
       removeLabel: null,
     };
   }
   return {
     conclusion: "neutral",
-    desc: `没有 \`${REQUIRED_LABEL}\`，跳过 QA`,
+    desc: gate.skip(gate),
     removeLabel: null,
   };
 }
@@ -120,11 +155,11 @@ function checkDesc(desc) {
    而这份文件现在是所有仓库共用的，所以照抄它的是「结论」不是「本仓现象」。
    调研见 GinkgoLeafLab/GTO-Trainer 仓的
    docs/方案/2026-09-放行检查改用-commit-status.md。**别改回 check run。** */
-function statusBody(labels, action, label, targetUrl) {
-  const d = decide(labels, action, label);
+function statusBody(labels, action, label, targetUrl, gate = GATES.qa) {
+  const d = decide(labels, action, label, gate);
   const state = STATE[d.conclusion];
   if (!state) throw new Error(`没有对应 commit status state 的结论：${d.conclusion}`);
-  const status = { state, context: "qa", description: checkDesc(d.desc) };
+  const status = { state, context: gate.name, description: checkDesc(d.desc) };
   if (targetUrl) status.target_url = targetUrl;
   return { status, removeLabel: d.removeLabel };
 }
@@ -132,6 +167,9 @@ function statusBody(labels, action, label, targetUrl) {
 /* —— CLI —— 从环境变量读，不从 argv 读：标签名是用户随手填的文本，
    进 argv 就要经过 shell，那是注入口子。JSON.stringify 顺带把引号转义接过去。 */
 function main() {
+  /* 哪道门：组合动作的 `gate` 输入经 QA_GATE_NAME 传进来。空串当 qa（输入的默认值），
+     认不得的名字抛。环境变量名沿用 QA_GATE_* 是为了 qa 那条路一个字节不动。 */
+  const gate = gateFor(process.env.QA_GATE_NAME || "qa");
   const raw = process.env.QA_GATE_LABELS;
   const sha = process.env.QA_GATE_SHA;
   const action = process.env.QA_GATE_EVENT;
@@ -161,7 +199,7 @@ function main() {
   /* sha 不进请求体——commit status 是 POST 到 /statuses/{sha} 的，SHA 在 URL 里。
      上面那道 40 位校验仍然必须留着：它挡住的是 workflow 接线错误。 */
   const { status, removeLabel } = statusBody(
-    labels, action, label, process.env.QA_GATE_TARGET_URL || ""
+    labels, action, label, process.env.QA_GATE_TARGET_URL || "", gate
   );
   /* 请求体走 stdout，调用方把它重定向进一个文件再交给 `gh api --input`。 */
   process.stdout.write(JSON.stringify(status));
@@ -174,7 +212,7 @@ function main() {
   }
 }
 
-module.exports = { decide, statusBody, checkDesc, REQUIRED_LABEL, PASSED_LABEL, ACTIONS, DESC_MAX };
+module.exports = { GATES, gateFor, decide, statusBody, checkDesc, REQUIRED_LABEL, PASSED_LABEL, ACTIONS, DESC_MAX };
 
 if (require.main === module) {
   try {

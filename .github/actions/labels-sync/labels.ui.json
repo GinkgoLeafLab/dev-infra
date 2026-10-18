@@ -1,0 +1,4 @@
+[
+  { "name": "ui-required", "color": "d876e3", "description": "这个 PR 属于必须过 UI 评审的那一类（不是「已经评审过了」）" },
+  { "name": "ui-passed", "color": "0e8a16", "description": "UI 评审通过的一次性信号：ui-gate 拿它在 head SHA 上写 ui 检查，然后自己摘掉" }
+]

@@ -4,7 +4,7 @@ name: labels-sync
 #
 # **清单和逻辑都不在这儿**：可复用工作流在 GinkgoLeafLab/dev-infra 的
 # .github/workflows/labels-sync.yml，同步脚本**和清单**（基础的 labels.json，以及按需的
-# labels.qa.json / labels.release.json）跟着那边的组合动作一起下发到 runner，各仓库共用同一份。
+# labels.qa.json / labels.ui.json / labels.release.json）跟着那边的组合动作一起下发到 runner，各仓库共用同一份。
 # 这份文件是 dev-infra 的 adopt 脚本按模板生成的。
 #
 # 为什么需要它：流程里有一批标签是**机制的组成部分**（issue 分级的
@@ -63,4 +63,5 @@ jobs:
       # **只有真的装了 qa-gate 的仓才给 true。** 给了 true 却没有 qa-gate，
       # 等于在这个仓里建两个没有任何东西在读的标签、还给了它们一份正式定义。
       qa-labels: __QA_LABELS__
+      ui-labels: __UI_LABELS__  # 只有装了 ui-gate 的仓才有这一行（ui-required / ui-passed），没装就整行不要
       release-labels: __RELEASE_LABELS__  # 只有装了 tag-on-merge 的仓才有这一行（release/* 三个标签），没装就整行不要

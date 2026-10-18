@@ -7,15 +7,16 @@
 |---|---|---|
 | `.github/workflows/review-gate.yml` | 可复用工作流 | caller 调它 |
 | `.github/workflows/qa-gate.yml` | 可复用工作流 | caller 调它 |
+| `.github/workflows/ui-gate.yml` | 可复用工作流：**UI 评审门禁**，必需检查 `ui`（qa-gate 的同形兄弟，标签 `ui-required` / `ui-passed`；方案见 `docs/方案/2026-10-ui-gate.md`） | 要 UI 评审门禁的仓放一个 caller 调它 |
 | `.github/workflows/labels-sync.yml` | 可复用工作流 | caller 调它 |
 | `.github/workflows/tag-on-merge.yml` | 可复用工作流：**PR 合进 main 之后自动打下一个 `vX.Y.Z`** | 要自动打 tag 的仓放一个 caller 调它 |
-| `.github/actions/qa-gate/` | 组合动作 + 判定脚本 + 它的测试 | **不直接用**，由上面那份工作流调 |
+| `.github/actions/qa-gate/` | 组合动作 + 判定脚本 + 它的测试。**同一份脚本管两道门**：`gate` 输入选 `qa`（默认）或 `ui`，差异只在 `qa-gate.js` 的 `GATES` 表（门名、两个标签、四句描述）；`ui-gate.test.js` 是 ui 门的测试 | **不直接用**，由 `qa-gate.yml` / `ui-gate.yml` 调 |
 | `.github/actions/review-gate-lock/` | 组合动作 + **PR 写锁判定** + 它的测试 | **不直接用**，由 `review-gate.yml` 调 |
 | `.github/actions/labels-sync/` | 组合动作 + 同步脚本 + 它的测试 + **共享的标签清单** | **不直接用**，由上面那份工作流调 |
 | `.github/actions/tag-on-merge/` | 组合动作 + **打 tag 的判定**（版本号怎么定、打在哪、什么时候宁可不打）+ 它的测试 | **不直接用**，由 `tag-on-merge.yml` 调 |
 | `.github/actions/docs-only/` | 组合动作 + 纯文档判定 + 它的测试 | **各仓的 workflow 直接 `uses:` 它**，当成一个步骤用 |
 | `shared/` | **第二层的源文件**：必须躺在各仓里才会被读到的那几份脚本与它们的测试 | 各仓把这个仓库整个当 **git submodule** 挂在 `vendor/dev-infra`，**不再各自落一份本地副本**。`core.hooksPath` 直接指进 `vendor/dev-infra/shared/githooks`；**PreToolUse hook 不直接指进子模块**，它走各仓自己那份 tracked 的 `scripts/guard-hook.js` 转接——子模块可以是空的，而空的时候 `node <缺失路径>` 是「非零退出、stdout 一个字节都没有」，PreToolUse 把它当 non-blocking error、**命令照常执行**（= 守卫静默放行） |
-| `adopt/` | **把一个仓库接上这套东西的脚本 + 那份 Skill**：写 caller（review-gate、labels-sync，要的话再加 qa-gate / tag-on-merge）、挂子模块、下发守卫入口、接 agent 定义的 subtree，以及事后 `--check` 体检同一套接线 | 接入时跑一次；之后每次升级 / 排查再跑 `--check` |
+| `adopt/` | **把一个仓库接上这套东西的脚本 + 那份 Skill**：写 caller（review-gate、labels-sync，要的话再加 qa-gate / ui-gate / tag-on-merge）、挂子模块、下发守卫入口、接 agent 定义的 subtree，以及事后 `--check` 体检同一套接线 | 接入时跑一次；之后每次升级 / 排查再跑 `--check` |
 | `.github/workflows/test.yml` | 本仓自己的测试，连同 `shared/` 里那份套件 | 不适用 |
 | `.github/workflows/self-review-gate.yml` / `self-labels-sync.yml`、`scripts/guard-hook.js`、`.claude/`、`package.json` | **这个仓库自己作为消费者的那一侧**（形状和别的仓不一样，见下面那一节） | 不适用 |
 | `self-adopt.test.js` | 钉住上面那一侧的接线——`adopt.js --check` 在这个仓库里判不了，会拒绝跑 | 不适用 |
@@ -57,7 +58,7 @@
 路径是 `$GITHUB_ACTION_PATH`。所以现在：
 
 - 脚本只有这一份，各消费仓**不再需要 `scripts/qa-gate.js`**
-- **`labels-sync` 连数据也跟着走**：`labels.json` / `labels.qa.json` 和脚本一起下发。
+- **`labels-sync` 连数据也跟着走**：`labels.json` / `labels.qa.json` / `labels.ui.json` 和脚本一起下发。
   各仓因此连标签清单都不再各存一份——这是这套机制唯一一处共享的不是逻辑而是**数据**，
   单独说清楚见下面「这里放什么、不放什么」
 - 这条路上**一次 checkout 都不做**，`contents: read` 那个坑结构性地没有了
@@ -176,6 +177,32 @@ jobs:
       pull-requests: write  # 摘 qa-passed 标签
     uses: GinkgoLeafLab/dev-infra/.github/workflows/qa-gate.yml@v1.2.0
 ```
+
+`ui-gate` 的 caller 与 `qa-gate` **逐行同形**，只换名字（`adopt --ui` 会生成）：
+
+```yaml
+name: ui-gate
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, labeled, unlabeled]   # 同 qa-gate：一条都不能少，不许加 paths
+permissions: {}
+concurrency:
+  group: ui-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+jobs:
+  gate:
+    if: >-
+      (github.event.action != 'labeled' && github.event.action != 'unlabeled')
+      || startsWith(github.event.label.name, 'ui-')
+    permissions:
+      statuses: write       # 写 `ui` 这个 commit status
+      pull-requests: write  # 摘 ui-passed 标签
+    uses: GinkgoLeafLab/dev-infra/.github/workflows/ui-gate.yml@<含 ui-gate 的 tag>
+```
+
+装了它要同时做三件事：`labels-sync` 的 caller 传 `ui-labels: true`（**并且那一行 `uses:` 升到同一个或更新的 tag**，
+更老的 tag 不认这个输入）；人去 ruleset 把 **`ui`** 钉成必需检查；评审通过时打 `ui-passed`。
+`ui-required` 标记「这个 PR 属于必须过 UI 评审的那一类」，没标的 PR 上 `ui` 写 `success`（描述「未标记需要 UI 评审」）。
 
 `labels-sync` 的 caller 又是另一个形状，**两处差异都正好是会写错的地方**：
 
@@ -576,7 +603,7 @@ node vendor/dev-infra/adopt/adopt.js --check
 |---|---|
 | `adopt/adopt.js` | 入口，以及**判定与渲染那一半**（纯函数：选 tag、渲染 caller、体检 caller、并 settings / package.json） |
 | `adopt/run.js` | **真的动盘上的东西那一半**：问 git、读写文件、按顺序跑那几步、打结论 |
-| `adopt/templates/` | 各份 caller（review-gate / qa-gate / labels-sync / tag-on-merge）、守卫入口转接、`docs-only` 那个步骤的片段 |
+| `adopt/templates/` | 各份 caller（review-gate / qa-gate / ui-gate / labels-sync / tag-on-merge）、守卫入口转接、`docs-only` 那个步骤的片段 |
 | `adopt/SKILL.md` | 给 agent 的那份：前提、每一条 ❌ 怎么办、PR 怎么开、永远不要做的几件事 |
 | `adopt/adopt.test.js` | 它的测试，含两种消费仓（CJS / **`"type": "module"`**）的端到端 |
 
@@ -623,6 +650,7 @@ package.json** 决定模块系统，往上找到的第一份会是消费仓自�
 | review-gate caller | `.github/workflows/review-gate.yml` | `.github/workflows/self-review-gate.yml` | 同名会把**本体**盖掉 |
 | labels-sync caller | `.github/workflows/labels-sync.yml` | `.github/workflows/self-labels-sync.yml` | 同上。**它里面那条 `paths:` 也跟着改成了自己的路径**——文件名和那条 `paths:` 是同一处真相的两半，只改一半的表现是「升了版本号、这条流水线根本没触发」，绿的、Actions 里连一条失败记录都没有 |
 | tag-on-merge caller | `.github/workflows/tag-on-merge.yml`（装了才有） | `.github/workflows/self-tag-on-merge.yml`（比另外两份晚接一步，见「本仓自己是怎么接上的」） | 同名会把**本体**盖掉。**按 tag 钉的额外好处**：本仓打 tag 用的是上一个发布版的脚本，一个把打 tag 逻辑改坏了的 PR 不会用它自己那一版给本仓打出错的版本号 |
+| ui-gate caller | 装了 UI 评审门禁的仓才有（`--ui`） | **没装**（同 qa-gate，本仓没有界面） |
 | qa-gate caller | 装了 QA 门禁的仓才有 | **没装** | 本仓的改动由 `test.yml` 那一排自动测试覆盖，没有「要人手点一遍」的东西。所以 `qa-labels` 也必须是 `false`：给 `true` 等于建两个没有任何东西在读的标签 |
 | 第二层的判定逻辑 | submodule `vendor/dev-infra` | **树里的 `shared/`**，不挂子模块 | 挂一个指回自己的子模块，本仓的钩子跑的就是**钉在某个旧 tag 上的那一版守卫**，而不是工作区里正在改的这一版——守卫改坏了本仓自己反而感觉不到，那正是这套东西要消灭的静默失效 |
 | 守卫入口 | `scripts/guard-hook.js` 指进子模块 | 同一份模板，那行 `GUARD` 指 `../shared/guard-branch.js` | 逐字节等于 `renderShim(模板, SELF_GUARD_REL)`，由 `self-adopt.test.js` 钉着。**别手改它**，改模板再重新生成 |
