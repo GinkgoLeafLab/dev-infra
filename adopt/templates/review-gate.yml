@@ -41,8 +41,16 @@ on:
 permissions: {}
 
 concurrency:
-  group: review-gate-${{ github.event.pull_request.number }}
-  # 跑到一半被砍会留下「标签摘了但检查没写」的状态，不取消。
+  # **并发组必须把「会跳过的事件」和「会真正跑判定的事件」分开，不能只按 PR 号分。**
+  # 同一组里新排队的 run 会取消先前排队的 run，而 job 级 `if` 要等轮到自己才判：
+  # 一个「打的是别的标签、注定 skip」的 run 可以把正要写 `review` 的那次挤掉，自己再
+  # skip 掉。这里是**失败方向安全**的一侧（`review` 缺席即拦），但「评审通过后没人
+  # 写检查、PR 莫名其妙卡着」同样是故障，而且没有任何报错。qa / ui 那两份是同一个洞的
+  # 危险方向（见 adopt/templates/qa-gate.yml 顶部的 Tianshu#199 实测）。
+  # **下面这一行的谓词必须和 job 级 `if` 逐字同义**；改一处就要同时改另一处。
+  group: review-gate-${{ github.event.pull_request.number }}-${{ (github.event.label.name == 'review-passed' || github.event.action == 'synchronize') && 'live' || 'skipped' }}
+  # 跑到一半被砍会留下「标签摘了但检查没写」的状态，不取消；排队的那次被更新事件挤掉
+  # 没关系——挤掉它的那次同样会跑判定。
   cancel-in-progress: false
 
 jobs:
@@ -55,6 +63,9 @@ jobs:
     #   - `review-passed` 那一半是标签路（标签事件只认这一个标签）
     #   - `synchronize` 那一半是 PR 写锁要的。**它不是标签事件**，
     #     所以 `github.event.label.name` 是 null，只看前半句的话它会被整个挡掉。
+    #
+    # **它和上面并发组里的那个谓词是同一处真相的两半**（理由见并发组那段）。
+    # 改任何一处都要同时改另一处；adopt 的体检与 gate-race.test.js 都钉着这一条。
     if: github.event.label.name == 'review-passed' || github.event.action == 'synchronize'
     # 权限必须在这儿要：官方原文 "If `jobs.<job_id>.permissions` is not specified
     # in the calling job, the called workflow will have the default permissions for

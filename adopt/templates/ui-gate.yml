@@ -29,14 +29,30 @@ on:
 permissions: {}
 
 concurrency:
-  group: ui-gate-${{ github.event.pull_request.number }}
-  # 跑到一半被砍会留下「标签摘了但检查没写」，不取消。
+  # **并发组必须把「会跳过的事件」和「会真正跑判定的事件」分开，不能只按 PR 号分。**
+  # 同一组里，新排队的 run 会取消**先前排队**的 run；而 job 级 `if` 要等排队结束、
+  # 轮到自己时才判。于是「打的是无关标签、注定 skip」的那次会把「打的是 ui- 标签、
+  # 正要重评」的那次挤掉，自己再 skip 掉——重评就这么没了，检查停在旧结论上。
+  # 在 GinkgoLeafLab/Tianshu#199 上实测过：opened run 41285479459 写了 success；
+  # 300ms 内先后打上 ui-required / qa-required，ui 那条 labeled run 41285482941
+  # 在排队时被后来 qa labeled 的 run 41285483063（随后 skipped）取消，
+  # `ui` 再没人重评，绿色一直留在 head 上。
+  # 把「会跳过的事件」放进另一个组，它就只能取消同类，碰不到真正要跑的那次。
+  # **下面这一行的谓词必须和 job 级 `if` 逐字同义**；只改一处等于把那个洞换个形状打开。
+  group: ui-gate-${{ github.event.pull_request.number }}-${{ (github.event.action == 'labeled' || github.event.action == 'unlabeled') && !startsWith(github.event.label.name, 'ui-') && 'skipped' || 'live' }}
+  # 跑到一半被砍会留下「标签摘了但检查没写」，不取消；排队的那次被更新事件挤掉没关系——
+  # 挤掉它的那次同样会跑判定，而且看到的是更新的标签。
   cancel-in-progress: false
 
 jobs:
   gate:
     # 标签事件只认 ui-* 那两个。**这一条是账单前提，不是过滤器**：写在 job 级的 if 上，
     # 别的标签连 runner 都不会起、不花配额。搬进 dev-infra 那份就变成「起了 runner 再判断」。
+    #
+    # **它和上面并发组里的那个谓词是同一处真相的两半**：并发组靠它把「注定 skip 的
+    # 事件」分到另一个组，免得它们挤掉真正要跑的那次；两处不一致时，被分到 live 组
+    # 却会 skip 的 run 照样能挤掉重评（或者反过来，live 的 run 被挤掉）。
+    # 改任何一处都要同时改另一处；adopt 的体检与 gate-race.test.js 都钉着这一条。
     if: >-
       (github.event.action != 'labeled' && github.event.action != 'unlabeled')
       || startsWith(github.event.label.name, 'ui-')

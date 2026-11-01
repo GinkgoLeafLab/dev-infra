@@ -54,7 +54,12 @@ on:
 permissions: {}
 
 concurrency:
-  group: review-gate-${{ github.event.pull_request.number }}
+  # **并发组按「会不会真跑判定」分组，不能只按 PR 号分**：同组里新排队的 run 会取消
+  # 先前排队的 run，而 job 级 `if` 要等轮到自己才判——一个注定 skip 的无关标签事件
+  # 可以把正要写 `review` 的那次挤掉，自己再 skip 掉。这里失败方向是安全的（缺席即拦），
+  # 但「评审通过后 PR 莫名卡着」同样是故障。理由与 qa/ui 那两份相同，见
+  # adopt/templates/review-gate.yml。**谓词必须和下面 job 级 `if` 逐字同义。**
+  group: review-gate-${{ github.event.pull_request.number }}-${{ (github.event.label.name == 'review-passed' || github.event.action == 'synchronize') && 'live' || 'skipped' }}
   # 跑到一半被砍会留下「标签摘了但检查没写」的状态，不取消。
   cancel-in-progress: false
 

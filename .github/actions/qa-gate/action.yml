@@ -27,6 +27,16 @@ inputs:
     description: 哪道门，qa 或 ui。认不得的名字判定脚本会抛（拦住，不是退回 qa）
     required: false
     default: qa
+  # **判定用的标签：优先实时快照，拿不到才退回事件载荷。**
+  # 事件载荷里的 `pull_request.labels` 是**事件创建那一刻**的快照；webhook 的送达
+  # 顺序不保证，一个先发生、后送达的 opened 事件会带着「还没有 ui-required」的旧快照
+  # 最后执行，把后来那次 labeled 写下的 failure 覆盖成 success。所以可复用工作流在
+  # 判定前现读一次 PR（见 qa-gate.yml「读实时标签」那一步），把结果从这里送进来。
+  # 空串 = 没读到（那一步会出声地红掉，不会走到这里），退回事件快照。
+  labels:
+    description: 实时拉取的标签 JSON 数组；空串时退回事件载荷里的快照
+    required: false
+    default: ''
 
 outputs:
   body_path:
@@ -49,7 +59,11 @@ runs:
     # 里都还带着 `qa-passed`，而 head 可能已经是一个没人测过的新 SHA——照单全收就是
     # **在那个 SHA 上写 success**，且表面上毫无症状。所以只认「这个事件本身就是在打
     # `qa-passed`」那一种（判定在 qa-gate.js，有断言钉着）。
-    # 改成在这里用 `gh api` 现读标签**不算修掉**：事件已经发出来了，读到的还是「摘之前」那一份。
+    # 改成在这里用 `gh api` 现读标签**不能代替上面这条**：摘掉 `qa-passed` 的
+    # DELETE 还没落地时，现读到的仍是「摘之前」那一份。但实时标签**能**补上另一类
+    # 快照失效：事件送达乱序时，先发生、后送达的 opened 事件带着旧快照最后执行。
+    # 两件事互不替代，所以工作流那边现读（`labels` 输入）、这里保留「只认本次事件
+    # 打上的 passed」这条判断，两边一起用。
     #
     # 这里的 github.* 取到的是**消费仓那次事件**：官方原话
     # "When a reusable workflow is triggered by a caller workflow, the `github` context
@@ -62,7 +76,7 @@ runs:
       env:
         QA_GATE_NAME: ${{ inputs.gate }}
         QA_GATE_SHA: ${{ github.event.pull_request.head.sha }}
-        QA_GATE_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        QA_GATE_LABELS: ${{ inputs.labels != '' && inputs.labels || toJSON(github.event.pull_request.labels.*.name) }}
         QA_GATE_EVENT: ${{ github.event.action }}
         # 非标签事件时 github.event.label 是 null，这里就是空串
         QA_GATE_LABEL: ${{ github.event.label.name }}
