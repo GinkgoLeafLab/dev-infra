@@ -78,8 +78,8 @@ jobs:
       # 的旧快照最后执行，把后来那次 labeled 写下的 failure 覆盖成 success。
       # 这一跑读的是**执行这一刻**的 PR，所以「没标」推出的 success 一定是真的没标。
       #
-      # **读不到就让这一步红**（脚本里 `set -euo pipefail`，gh 非零退出即中断）：job 红 → 这个 SHA 上
-      # 没有 `qa` → PR 停在 Expected 上，拦住而不是放行。这和 qa-gate.js 里
+      # **读不到就让这一步红**（脚本里 `set -euo pipefail`，gh 非零退出即中断）：
+      # 下一步会把这个 SHA 上的 `qa` 写成 `error`，PR 拦住而不是放行。这和 qa-gate.js 里
       # 「读不到、判不了就抛」的方向一致；退回事件快照会把上面那个洞原样打开。
       #
       # 权限用 caller 给的 `pull-requests: write`（写包含读），不需要 `contents`。
@@ -92,6 +92,21 @@ jobs:
           set -euo pipefail
           LABELS=$(gh api "repos/$REPO/pulls/$PR" --jq '.labels[].name' | jq -R 'select(length > 0) | .' | jq -s -c .)
           echo "labels=$LABELS" >> "$GITHUB_OUTPUT"
+
+      # **这一步是上面「job 红 → Expected」那句话的另一半。** 必需检查看的是同一
+      # context 的**最新一条** status：同一个 SHA 上，早先 opened 那一跑写过的 success
+      # 不会因为这次 job 红了自己消失。少了这一步，一次读标签失败就把 PR 留在**旧绿**上，
+      # 而 `qa-required` 明明已经打上了——正是这次要修的那类放行。
+      # 所以读不到时显式写 `error`（语义是「判不了」，不是「判不过」），盖掉旧结论。
+      - name: 读不到实时标签时把 qa 写成 error
+        if: failure() && steps.live_labels.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          jq -n '{state:"error",context:"qa",description:"读不到 PR 的实时标签，无法判定"}' \
+            | gh api "repos/$REPO/statuses/$SHA" --input -
 
       # 判定逻辑与那段脚本都在这个组合动作里，**和这份工作流住在同一个仓库、
       # 同一个 commit**，所以用 GitHub 的自引用语法 `$/`——它解析到

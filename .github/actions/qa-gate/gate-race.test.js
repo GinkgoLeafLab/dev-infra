@@ -83,6 +83,12 @@ for (const [kind, gate] of [["qa-gate", GATES.qa], ["ui-gate", GATES.ui]]) {
     wf.includes('gh api "repos/$REPO/pulls/$PR" --jq \'.labels[].name\' | jq -R \'select(length > 0) | .\' | jq -s -c .'));
   ok(`${kind} 工作流：现读结果经 labels 输入交给判定动作`,
     wf.includes("labels: ${{ steps.live_labels.outputs.labels }}"));
+  /* 现读失败时，同一个 SHA 上早先的 success 不会自己消失；必须显式写 error 盖掉，
+     否则「读不到 → 拦住」这句话在「opened 已经写过 success」的场景里是假的。 */
+  ok(`${kind} 工作流：现读失败时写 error 覆盖这个 SHA 上的旧结论`,
+    wf.includes("steps.live_labels.outcome == 'failure'") &&
+    wf.includes(`context:"${gate.name}"`) &&
+    wf.includes('state:"error"'));
 }
 
 ok("组合动作：labels 输入优先于事件快照",

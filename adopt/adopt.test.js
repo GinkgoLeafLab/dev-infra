@@ -137,6 +137,15 @@ for (const [kind, bare] of [
   check(`${kind} 并发组退回「只按 PR 号」判得出来`,
     /并发组/.test(lint(kind, (t) => t.replace(/^  group: .*$/m, "  " + bare))), true);
 }
+/* 谓词都在、但 live / skipped 接反了：真正要判定的 run 被分进 skipped，重评照样消失。 */
+for (const [kind, from, to] of [
+  ["qa-gate", "&& 'skipped' || 'live'", "&& 'live' || 'skipped'"],
+  ["ui-gate", "&& 'skipped' || 'live'", "&& 'live' || 'skipped'"],
+  ["review-gate", "&& 'live' || 'skipped'", "&& 'skipped' || 'live'"],
+]) {
+  check(`${kind} 并发组把 live / skipped 接反判得出来`,
+    /接反/.test(lint(kind, (t) => t.replace(from, to))), true);
+}
 /* 谓词只在并发组里、job 级 if 里没了：旧判据（全文出现过）会误判成绿。 */
 check("qa-gate job 级 if 里没有 qa-* 判得出来（并发组里出现不算）",
   /job 级 if 里没有 qa-\*/.test(lint("qa-gate", (t) => t.replace("|| startsWith(github.event.label.name, 'qa-')", "|| false"))), true);

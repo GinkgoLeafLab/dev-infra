@@ -248,7 +248,7 @@ function lintCaller(kind, text, { qa, release, ui = false } = {}) {
      自己再 skip 掉——重评静默消失，检查停在旧结论上（GinkgoLeafLab/Tianshu#199
      实测：ui 的 success 就这样留在了 head 上）。失败方向对 qa/ui 是放行，
      所以这条必须是硬失败，不能只写注释。 */
-  const partitionProblems = (kind, predicates) => {
+  const partitionProblems = (kind, predicates, tail) => {
     if (!/^concurrency:\s*\n\s+group:/m.test(code)) {
       bad.push(`没有并发组：${kind} 的同一 PR 事件会互相挤掉，也会并发写同一个 head`);
       return;
@@ -264,6 +264,11 @@ function lintCaller(kind, text, { qa, release, ui = false } = {}) {
           "检查停在旧结论上——GinkgoLeafLab/Tianshu#199 的 ui 绿就是这样留下的"
         );
       }
+    }
+    /* 谓词在、但两个分支接反了（把 live 的事件分进 skipped）同样会让重评消失，
+       而且只看「谓词出现过」判不出来。这里钉住 live / skipped 的落点。 */
+    if (!groupLine.includes(tail)) {
+      bad.push(`并发组的 live / skipped 接反了（缺 \`${tail}\`）：真正要判定的 run 会被分到 skipped`);
     }
     if (!/cancel-in-progress:\s*false/.test(code)) {
       bad.push(`并发组开了 cancel-in-progress：跑到一半被砍会留下「标签摘了但检查没写」`);
@@ -287,7 +292,9 @@ function lintCaller(kind, text, { qa, release, ui = false } = {}) {
     }
     if (!has(/statuses:\s*write/)) bad.push("少了 statuses: write，写不了 review 检查");
     if (!has(/pull-requests:\s*write/)) bad.push("少了 pull-requests: write，摘不了标签也读不了写锁评论");
-    partitionProblems("review-gate", ["github.event.label.name == 'review-passed'", "github.event.action == 'synchronize'"]);
+    partitionProblems("review-gate",
+      ["github.event.label.name == 'review-passed'", "github.event.action == 'synchronize'"],
+      "&& 'live' || 'skipped'");
   }
   if (kind === "qa-gate") {
     for (const t of ["opened", "reopened", "synchronize", "labeled", "unlabeled"]) {
@@ -299,7 +306,7 @@ function lintCaller(kind, text, { qa, release, ui = false } = {}) {
     if (!has(/statuses:\s*write/)) bad.push("少了 statuses: write");
     if (!has(/pull-requests:\s*write/)) bad.push("少了 pull-requests: write");
     if (has(/^\s*paths(-ignore)?:/m)) bad.push("有 paths / paths-ignore：必需检查被 workflow 级过滤跳过就永远 pending");
-    partitionProblems("qa-gate", ["startsWith(github.event.label.name, 'qa-')"]);
+    partitionProblems("qa-gate", ["!startsWith(github.event.label.name, 'qa-')"], "&& 'skipped' || 'live'");
   }
   if (kind === "ui-gate") {
     /* 和 qa-gate 同形，只是标签前缀与检查名换成 ui。 */
@@ -312,7 +319,7 @@ function lintCaller(kind, text, { qa, release, ui = false } = {}) {
     if (!has(/statuses:\s*write/)) bad.push("少了 statuses: write");
     if (!has(/pull-requests:\s*write/)) bad.push("少了 pull-requests: write");
     if (has(/^\s*paths(-ignore)?:/m)) bad.push("有 paths / paths-ignore：必需检查被 workflow 级过滤跳过就永远 pending");
-    partitionProblems("ui-gate", ["startsWith(github.event.label.name, 'ui-')"]);
+    partitionProblems("ui-gate", ["!startsWith(github.event.label.name, 'ui-')"], "&& 'skipped' || 'live'");
     if (!has(/uses:\s*GinkgoLeafLab\/dev-infra\/\.github\/workflows\/ui-gate\.yml@/)) bad.push("uses: 指的不是 dev-infra 的 ui-gate.yml（指到 qa-gate.yml 会写出 qa 而不是 ui）");
   }
   if (kind === "tag-on-merge") {
