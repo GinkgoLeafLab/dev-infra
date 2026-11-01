@@ -144,7 +144,8 @@ const SCENARIO_B = [
    事件先送达、先跑完。opened 那一跑最后执行：
      - 只读事件快照：写出「没有 required」的 success，把前面的 failure 覆盖掉；
      - 现读标签：执行那一刻两个 required 都在，写 failure。
-   这一层和并发组无关（三个 run 都属于 live 组），只能靠现读挡住。 */
+   这一层和并发组无关：把 partitioned 置 false（全部同组）仍然复现
+   「快照 success、现读 failure」，所以 C 验的是现读本身，不是分区。 */
 const SCENARIO_C = [
   { t: 0,   deliverAt: 8000, action: "opened",  label: null,          labels: [] },
   { t: 300, action: "labeled", label: "ui-required", labels: ["ui-required"] },
