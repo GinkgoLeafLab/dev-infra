@@ -139,7 +139,9 @@ on:
     types: [labeled, synchronize]
 permissions: {}
 concurrency:
-  group: review-gate-${{ github.event.pull_request.number }}
+  # 并发组按「这次事件会不会真的跑判定」分区：注定 skip 的无关标签事件只能取消同类，
+  # 不会把正要重评的那次挤掉（GinkgoLeafLab/Tianshu#199，见 docs/方案/2026-11-标签竞态-并发组与实时标签.md）。
+  group: review-gate-${{ github.event.pull_request.number }}-${{ (github.event.label.name == 'review-passed' || github.event.action == 'synchronize') && 'live' || 'skipped' }}
   cancel-in-progress: false
 jobs:
   gate:
@@ -164,7 +166,8 @@ on:
     types: [opened, reopened, synchronize, labeled, unlabeled]
 permissions: {}
 concurrency:
-  group: qa-gate-${{ github.event.pull_request.number }}
+  # 分区理由同 review-gate 那条（Tianshu#199）：谓词必须与 job 级 if 同义。
+  group: qa-gate-${{ github.event.pull_request.number }}-${{ (github.event.action == 'labeled' || github.event.action == 'unlabeled') && !startsWith(github.event.label.name, 'qa-') && 'skipped' || 'live' }}
   cancel-in-progress: false
 jobs:
   gate:
@@ -187,7 +190,8 @@ on:
     types: [opened, reopened, synchronize, labeled, unlabeled]   # 同 qa-gate：一条都不能少，不许加 paths
 permissions: {}
 concurrency:
-  group: ui-gate-${{ github.event.pull_request.number }}
+  # 分区理由同 qa-gate（Tianshu#199）：谓词必须与 job 级 if 同义。
+  group: ui-gate-${{ github.event.pull_request.number }}-${{ (github.event.action == 'labeled' || github.event.action == 'unlabeled') && !startsWith(github.event.label.name, 'ui-') && 'skipped' || 'live' }}
   cancel-in-progress: false
 jobs:
   gate:
@@ -203,6 +207,11 @@ jobs:
 装了它要同时做三件事：`labels-sync` 的 caller 传 `ui-labels: true`（**并且那一行 `uses:` 升到同一个或更新的 tag**，
 更老的 tag 不认这个输入）；人去 ruleset 把 **`ui`** 钉成必需检查；评审通过时打 `ui-passed`。
 `ui-required` 标记「这个 PR 属于必须过 UI 评审的那一类」，没标的 PR 上 `ui` 写 `success`（描述「未标记需要 UI 评审」）。
+
+**qa / ui 的判定读的是执行那一刻现读的标签**（可复用工作流里的 `live_labels` 步骤），
+不是事件载荷里的快照：webhook 送达顺序不保证，先发生、后送达的 opened 会带着旧快照
+最后执行。读不到实时标签时那一步红，并由下一步在这个 head SHA 上显式写 `error`
+（新 SHA 上写的就是这条 error，同一 SHA 上则盖掉早先的 success），拦住而不是放行。
 
 `labels-sync` 的 caller 又是另一个形状，**两处差异都正好是会写错的地方**：
 

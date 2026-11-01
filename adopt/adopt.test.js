@@ -116,7 +116,7 @@ check("ui-gate 少一个事件判得出来",
 check("ui-gate 加了 paths 判得出来",
   /paths/.test(lint("ui-gate", (t) => t.replace("permissions: {}", "permissions: {}\n    paths:\n      - src/**"))), true);
 check("ui-gate job 级 if 少了 ui- 前缀判得出来",
-  /ui-\*/.test(lint("ui-gate", (t) => t.replace("'ui-'", "'qa-'"))), true);
+  /ui-\*/.test(lint("ui-gate", (t) => t.replace("|| startsWith(github.event.label.name, 'ui-')", "|| startsWith(github.event.label.name, 'qa-')"))), true);
 check("ui-gate 不是 pull_request_target 判得出来",
   /pull_request_target/.test(lint("ui-gate", (t) => t.replace("pull_request_target:", "pull_request:"))), true);
 check("ui-gate 加了 contents: read 判得出来",
@@ -125,6 +125,43 @@ check("ui-gate 误指 qa-gate.yml 判得出来",
   /ui-gate\.yml/.test(lint("ui-gate", (t) => t.replace("workflows/ui-gate.yml@", "workflows/qa-gate.yml@"))), true);
 check("给 caller 加 contents: read 判得出来",
   /contents: read/.test(lint("qa-gate", (t) => t.replace("statuses: write", "contents: read\n      statuses: write"))), true);
+
+/* —— 并发组竞态（GinkgoLeafLab/Tianshu#199）——
+   只按 PR 号分组的旧写法：一个注定 skip 的无关标签 run 会挤掉正要重评的那次，
+   自己再 skip 掉。qa / ui 的失败方向是**放行**，所以这三条必须判得出来。 */
+for (const [kind, bare] of [
+  ["qa-gate", "group: qa-gate-${{ github.event.pull_request.number }}"],
+  ["ui-gate", "group: ui-gate-${{ github.event.pull_request.number }}"],
+  ["review-gate", "group: review-gate-${{ github.event.pull_request.number }}"],
+]) {
+  check(`${kind} 并发组退回「只按 PR 号」判得出来`,
+    /并发组/.test(lint(kind, (t) => t.replace(/^  group: .*$/m, "  " + bare))), true);
+}
+/* 谓词都在、但 live / skipped 接反了：真正要判定的 run 被分进 skipped，重评照样消失。 */
+for (const [kind, from, to] of [
+  ["qa-gate", "&& 'skipped' || 'live'", "&& 'live' || 'skipped'"],
+  ["ui-gate", "&& 'skipped' || 'live'", "&& 'live' || 'skipped'"],
+  ["review-gate", "&& 'live' || 'skipped'", "&& 'skipped' || 'live'"],
+]) {
+  check(`${kind} 并发组把 live / skipped 接反判得出来`,
+    /接反/.test(lint(kind, (t) => t.replace(from, to))), true);
+}
+/* 两类只做「片段出现过」会漏掉的变异：整行规范表达式必须判得出来。 */
+check("qa-gate 并发组丢掉 unlabeled 判得出来",
+  /并发组不是规范表达式/.test(lint("qa-gate", (t) => t.replace(
+    "(github.event.action == 'labeled' || github.event.action == 'unlabeled')",
+    "(github.event.action == 'labeled')"))), true);
+check("review-gate 并发组把两个条件之间的 || 改成 && 判得出来",
+  /并发组不是规范表达式/.test(lint("review-gate", (t) => t.replace(
+    "(github.event.label.name == 'review-passed' || github.event.action == 'synchronize')",
+    "(github.event.label.name == 'review-passed' && github.event.action == 'synchronize')"))), true);
+/* 谓词只在并发组里、job 级 if 里没了：旧判据（全文出现过）会误判成绿。 */
+check("qa-gate job 级 if 里没有 qa-* 判得出来（并发组里出现不算）",
+  /job 级 if 里没有 qa-\*/.test(lint("qa-gate", (t) => t.replace("|| startsWith(github.event.label.name, 'qa-')", "|| false"))), true);
+check("ui-gate job 级 if 里没有 ui-* 判得出来（并发组里出现不算）",
+  /job 级 if 里没有 ui-\*/.test(lint("ui-gate", (t) => t.replace("|| startsWith(github.event.label.name, 'ui-')", "|| false"))), true);
+check("review-gate job 级 if 整行没了判得出来（并发组里出现不算）",
+  /if 那一行/.test(lint("review-gate", (t) => t.replace(/^\s+if: .*$/m, "    if: true"))), true);
 check("labels-sync 抄了隔壁的 statuses 判得出来",
   /statuses/.test(lint("labels-sync", (t) => t.replace(/^(\s+)issues: write$/m, "$1issues: write\n$1statuses: write"))), true);
 check("labels-sync 少了 issues: write 判得出来",

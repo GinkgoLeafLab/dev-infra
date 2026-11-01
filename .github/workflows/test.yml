@@ -74,6 +74,14 @@ jobs:
         if: always()
         run: node .github/actions/qa-gate/ui-gate.test.js
 
+      # 标签竞态（Tianshu#199）：把 GitHub 的并发组语义照原样模拟一遍。
+      # 旧分组下「注定 skip 的无关标签 run 挤掉重评」必须复现出 success；
+      # 新分组（live / skipped 分开）必须两次都落到 failure。它同时钉住
+      # 「判定前现读标签」那条接线——只做并发分区挡不住 webhook 乱序送达。
+      - name: 标签竞态（并发组 / 实时标签）
+        if: always()
+        run: node .github/actions/qa-gate/gate-race.test.js
+
       - name: 标签同步
         if: always()
         run: node .github/actions/labels-sync/labels.test.js

@@ -240,6 +240,36 @@ function lintCaller(kind, text, { qa, release, ui = false } = {}) {
      「接线上有」——那是这份体检最不能犯的错（漏判 = 说它装好了，其实没装）。 */
   const code = text.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
   const has = (re) => re.test(code);
+  /* 并发组那一行，供下面「按会不会真跑判定来分组」的判定用。
+     只取 `group:` 这一行，不取注释——这些模板的注释里写着整段事故说明。 */
+  const groupLine = (code.match(/^\s+group:\s*(.+)$/m) || [])[1] || "";
+  /* **并发组必须按「这次事件会不会真的跑判定」分组**（不是只按 PR 号）。
+     不分组时，一个打的是无关标签、注定 skip 的 run 在排队时会把正要重评的那次挤掉，
+     自己再 skip 掉——重评静默消失，检查停在旧结论上（GinkgoLeafLab/Tianshu#199
+     实测：ui 的 success 就这样留在了 head 上）。失败方向对 qa/ui 是放行，
+     所以这条必须是硬失败，不能只写注释。
+
+     **按整行规范表达式比对，不比片段。** 片段比对漏得掉两类同样致命的改法：
+     把 `labeled || unlabeled` 删成一个（unlabeled 的非门标签事件会 skip 却进 live 组）、
+     把 review 那两个条件之间的 `||` 改成 `&&`（两半不可能同时为真，全部落进 skipped）。
+     两种都实测能骗过「谓词出现过」的检查，而它们都会让重评被挤掉。 */
+  const partitionProblems = (kind, canonical) => {
+    if (!/^concurrency:\s*\n\s+group:/m.test(code)) {
+      bad.push(`没有并发组：${kind} 的同一 PR 事件会互相挤掉，也会并发写同一个 head`);
+      return;
+    }
+    const norm = (s) => s.replace(/\s+/g, " ").trim();
+    if (norm(groupLine) !== norm(canonical)) {
+      bad.push(
+        `并发组不是规范表达式（要 \`${canonical}\`，实际 \`${groupLine}\`）：` +
+        "谓词必须与 job 级 if 逐字同义，live / skipped 的落点也不能接反；" +
+        "只差一处时，注定 skip 的 run 仍会挤掉正要重评的那次（GinkgoLeafLab/Tianshu#199）"
+      );
+    }
+    if (!/cancel-in-progress:\s*false/.test(code)) {
+      bad.push(`并发组开了 cancel-in-progress：跑到一半被砍会留下「标签摘了但检查没写」`);
+    }
+  };
   if (!has(/^on:/m)) bad.push("没有 on: 触发器");
   else if ((kind === "review-gate" || kind === "qa-gate" || kind === "ui-gate") && !has(/^\s*pull_request_target:/m)) {
     bad.push("不是 pull_request_target：定义取自默认分支这条安全地基没了，PR 能改本文件放行自己");
@@ -249,31 +279,50 @@ function lintCaller(kind, text, { qa, release, ui = false } = {}) {
     if (!has(/types:\s*\[[^\]]*synchronize/)) bad.push("types 里少了 synchronize：PR 写锁那条路永远不跑，而且不报错");
     if (!has(/if:[\s\S]*review-passed/)) bad.push("job 级 if 里少了 review-passed");
     if (!has(/action == 'synchronize'/)) bad.push("job 级 if 里少了 synchronize 那一半：它不是标签事件，会被整个挡在门外");
+    /* **这两条要具体到 `if:` 那一行**：加了并发组之后，组里也写着同样的谓词，
+       「全文里出现过」会把「if 没了、只剩并发组」判成绿的——而那正是最该拦的形态。 */
+    {
+      const ifLine = (code.match(/^\s+if:.*$/m) || [])[0] || "";
+      if (!ifLine.includes("review-passed")) bad.push("job 级 if 那一行里没有 review-passed（只在并发组里出现不算）");
+      if (!ifLine.includes("action == 'synchronize'")) bad.push("job 级 if 那一行里没有 synchronize 那一半（只在并发组里出现不算）");
+    }
     if (!has(/statuses:\s*write/)) bad.push("少了 statuses: write，写不了 review 检查");
     if (!has(/pull-requests:\s*write/)) bad.push("少了 pull-requests: write，摘不了标签也读不了写锁评论");
+    partitionProblems("review-gate",
+      "review-gate-${{ github.event.pull_request.number }}-${{ " +
+      "(github.event.label.name == 'review-passed' || github.event.action == 'synchronize') " +
+      "&& 'live' || 'skipped' }}");
   }
   if (kind === "qa-gate") {
     for (const t of ["opened", "reopened", "synchronize", "labeled", "unlabeled"]) {
       if (!has(new RegExp("types:\\s*\\[[^\\]]*" + t))) bad.push(`types 里少了 ${t}：少报告一次 qa，那个 PR 就永远停在 Expected`);
     }
-    if (!has(/startsWith\(github\.event\.label\.name, 'qa-'\)/)) {
+    if (!has(/\|\|\s*startsWith\(github\.event\.label\.name, 'qa-'\)/)) {
       bad.push("job 级 if 里没有 qa-* 那条：别的标签事件也会起 runner，账单前提没了");
     }
     if (!has(/statuses:\s*write/)) bad.push("少了 statuses: write");
     if (!has(/pull-requests:\s*write/)) bad.push("少了 pull-requests: write");
     if (has(/^\s*paths(-ignore)?:/m)) bad.push("有 paths / paths-ignore：必需检查被 workflow 级过滤跳过就永远 pending");
+    partitionProblems("qa-gate",
+      "qa-gate-${{ github.event.pull_request.number }}-${{ " +
+      "(github.event.action == 'labeled' || github.event.action == 'unlabeled') " +
+      "&& !startsWith(github.event.label.name, 'qa-') && 'skipped' || 'live' }}");
   }
   if (kind === "ui-gate") {
     /* 和 qa-gate 同形，只是标签前缀与检查名换成 ui。 */
     for (const t of ["opened", "reopened", "synchronize", "labeled", "unlabeled"]) {
       if (!has(new RegExp("types:\\s*\\[[^\\]]*" + t))) bad.push(`types 里少了 ${t}：少报告一次 ui，那个 PR 就永远停在 Expected`);
     }
-    if (!has(/startsWith\(github\.event\.label\.name, 'ui-'\)/)) {
+    if (!has(/\|\|\s*startsWith\(github\.event\.label\.name, 'ui-'\)/)) {
       bad.push("job 级 if 里没有 ui-* 那条：别的标签事件也会起 runner，账单前提没了");
     }
     if (!has(/statuses:\s*write/)) bad.push("少了 statuses: write");
     if (!has(/pull-requests:\s*write/)) bad.push("少了 pull-requests: write");
     if (has(/^\s*paths(-ignore)?:/m)) bad.push("有 paths / paths-ignore：必需检查被 workflow 级过滤跳过就永远 pending");
+    partitionProblems("ui-gate",
+      "ui-gate-${{ github.event.pull_request.number }}-${{ " +
+      "(github.event.action == 'labeled' || github.event.action == 'unlabeled') " +
+      "&& !startsWith(github.event.label.name, 'ui-') && 'skipped' || 'live' }}");
     if (!has(/uses:\s*GinkgoLeafLab\/dev-infra\/\.github\/workflows\/ui-gate\.yml@/)) bad.push("uses: 指的不是 dev-infra 的 ui-gate.yml（指到 qa-gate.yml 会写出 qa 而不是 ui）");
   }
   if (kind === "tag-on-merge") {

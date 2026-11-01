@@ -27,6 +27,33 @@ jobs:
     timeout-minutes: 5
     # permissions 不写在这儿，见上面第 3 条。
     steps:
+      # 同 qa-gate.yml 的「读实时标签」：`github.event.pull_request.labels` 是事件创建
+      # 那一刻的快照，webhook 乱序送达时，先发生、后送达的 opened 会带着旧快照最后执行，
+      # 把 labeled 写下的 failure 覆盖成 success。现读一次 PR，判定才凭执行这一刻的事实。
+      # 读不到就红（脚本里 `set -euo pipefail`，gh 非零退出即中断），下一步把这个 SHA 上的
+      # `ui` 写成 `error`：拦住而不是放行，和判定脚本的失败方向一致。
+      - id: live_labels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          LABELS=$(gh api "repos/$REPO/pulls/$PR" --jq '.labels[].name' | jq -R 'select(length > 0) | .' | jq -s -c .)
+          echo "labels=$LABELS" >> "$GITHUB_OUTPUT"
+
+      # 同 qa-gate.yml 的 error 兜底：同一个 SHA 上早先的 success 不会因为这次 job 红掉
+      # 自己消失，不显式写 `error` 盖掉它，一次读标签失败就把 PR 留在旧绿上。
+      - name: 读不到实时标签时把 ui 写成 error
+        if: failure() && steps.live_labels.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          jq -n '{state:"error",context:"ui",description:"读不到 PR 的实时标签，无法判定"}' \
+            | gh api "repos/$REPO/statuses/$SHA" --input -
+
       # 同仓自引用 `$/`：不带 `@{ref}`、不是 `./`（理由逐条见 qa-gate.yml 同一位置）。
       # 复用 qa-gate 这个动作，只是选 ui 这道门。**`gate: ui` 不能漏**：漏了动作按默认
       # 走 qa，会在消费仓的 head SHA 上写出一个 `qa`（ui-gate.test.js 钉着这一行）。
@@ -34,6 +61,8 @@ jobs:
         uses: $/.github/actions/qa-gate
         with:
           gate: ui
+          # 现读的那一份；空串在动作里退回事件快照（正常路径下这一步已经红掉了）
+          labels: ${{ steps.live_labels.outputs.labels }}
 
       # 钉死 head.sha（脚本里已经写进请求体了）。写的是 commit status 不是 check run，
       # 实测依据与「别改回去」见 qa-gate.yml 同一位置。
