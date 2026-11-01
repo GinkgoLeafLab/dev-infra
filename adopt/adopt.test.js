@@ -146,6 +146,15 @@ for (const [kind, from, to] of [
   check(`${kind} 并发组把 live / skipped 接反判得出来`,
     /接反/.test(lint(kind, (t) => t.replace(from, to))), true);
 }
+/* 两类只做「片段出现过」会漏掉的变异：整行规范表达式必须判得出来。 */
+check("qa-gate 并发组丢掉 unlabeled 判得出来",
+  /并发组不是规范表达式/.test(lint("qa-gate", (t) => t.replace(
+    "(github.event.action == 'labeled' || github.event.action == 'unlabeled')",
+    "(github.event.action == 'labeled')"))), true);
+check("review-gate 并发组把两个条件之间的 || 改成 && 判得出来",
+  /并发组不是规范表达式/.test(lint("review-gate", (t) => t.replace(
+    "(github.event.label.name == 'review-passed' || github.event.action == 'synchronize')",
+    "(github.event.label.name == 'review-passed' && github.event.action == 'synchronize')"))), true);
 /* 谓词只在并发组里、job 级 if 里没了：旧判据（全文出现过）会误判成绿。 */
 check("qa-gate job 级 if 里没有 qa-* 判得出来（并发组里出现不算）",
   /job 级 if 里没有 qa-\*/.test(lint("qa-gate", (t) => t.replace("|| startsWith(github.event.label.name, 'qa-')", "|| false"))), true);

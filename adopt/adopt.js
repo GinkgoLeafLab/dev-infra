@@ -247,28 +247,24 @@ function lintCaller(kind, text, { qa, release, ui = false } = {}) {
      不分组时，一个打的是无关标签、注定 skip 的 run 在排队时会把正要重评的那次挤掉，
      自己再 skip 掉——重评静默消失，检查停在旧结论上（GinkgoLeafLab/Tianshu#199
      实测：ui 的 success 就这样留在了 head 上）。失败方向对 qa/ui 是放行，
-     所以这条必须是硬失败，不能只写注释。 */
-  const partitionProblems = (kind, predicates, tail) => {
+     所以这条必须是硬失败，不能只写注释。
+
+     **按整行规范表达式比对，不比片段。** 片段比对漏得掉两类同样致命的改法：
+     把 `labeled || unlabeled` 删成一个（unlabeled 的非门标签事件会 skip 却进 live 组）、
+     把 review 那两个条件之间的 `||` 改成 `&&`（两半不可能同时为真，全部落进 skipped）。
+     两种都实测能骗过「谓词出现过」的检查，而它们都会让重评被挤掉。 */
+  const partitionProblems = (kind, canonical) => {
     if (!/^concurrency:\s*\n\s+group:/m.test(code)) {
       bad.push(`没有并发组：${kind} 的同一 PR 事件会互相挤掉，也会并发写同一个 head`);
       return;
     }
-    if (!groupLine.includes("github.event.pull_request.number")) {
-      bad.push(`并发组没有按 PR 分：${kind} 的两次事件会跑成同一组`);
-    }
-    for (const predicate of predicates) {
-      if (!groupLine.includes(predicate)) {
-        bad.push(
-          `并发组没有把「注定 skip 的事件」分开（缺 \`${predicate}\`）：` +
-          "一个打无关标签、注定 skip 的 run 会把正要重评的那次挤掉，自己再 skip 掉，" +
-          "检查停在旧结论上——GinkgoLeafLab/Tianshu#199 的 ui 绿就是这样留下的"
-        );
-      }
-    }
-    /* 谓词在、但两个分支接反了（把 live 的事件分进 skipped）同样会让重评消失，
-       而且只看「谓词出现过」判不出来。这里钉住 live / skipped 的落点。 */
-    if (!groupLine.includes(tail)) {
-      bad.push(`并发组的 live / skipped 接反了（缺 \`${tail}\`）：真正要判定的 run 会被分到 skipped`);
+    const norm = (s) => s.replace(/\s+/g, " ").trim();
+    if (norm(groupLine) !== norm(canonical)) {
+      bad.push(
+        `并发组不是规范表达式（要 \`${canonical}\`，实际 \`${groupLine}\`）：` +
+        "谓词必须与 job 级 if 逐字同义，live / skipped 的落点也不能接反；" +
+        "只差一处时，注定 skip 的 run 仍会挤掉正要重评的那次（GinkgoLeafLab/Tianshu#199）"
+      );
     }
     if (!/cancel-in-progress:\s*false/.test(code)) {
       bad.push(`并发组开了 cancel-in-progress：跑到一半被砍会留下「标签摘了但检查没写」`);
@@ -293,8 +289,9 @@ function lintCaller(kind, text, { qa, release, ui = false } = {}) {
     if (!has(/statuses:\s*write/)) bad.push("少了 statuses: write，写不了 review 检查");
     if (!has(/pull-requests:\s*write/)) bad.push("少了 pull-requests: write，摘不了标签也读不了写锁评论");
     partitionProblems("review-gate",
-      ["github.event.label.name == 'review-passed'", "github.event.action == 'synchronize'"],
-      "&& 'live' || 'skipped'");
+      "review-gate-${{ github.event.pull_request.number }}-${{ " +
+      "(github.event.label.name == 'review-passed' || github.event.action == 'synchronize') " +
+      "&& 'live' || 'skipped' }}");
   }
   if (kind === "qa-gate") {
     for (const t of ["opened", "reopened", "synchronize", "labeled", "unlabeled"]) {
@@ -306,7 +303,10 @@ function lintCaller(kind, text, { qa, release, ui = false } = {}) {
     if (!has(/statuses:\s*write/)) bad.push("少了 statuses: write");
     if (!has(/pull-requests:\s*write/)) bad.push("少了 pull-requests: write");
     if (has(/^\s*paths(-ignore)?:/m)) bad.push("有 paths / paths-ignore：必需检查被 workflow 级过滤跳过就永远 pending");
-    partitionProblems("qa-gate", ["!startsWith(github.event.label.name, 'qa-')"], "&& 'skipped' || 'live'");
+    partitionProblems("qa-gate",
+      "qa-gate-${{ github.event.pull_request.number }}-${{ " +
+      "(github.event.action == 'labeled' || github.event.action == 'unlabeled') " +
+      "&& !startsWith(github.event.label.name, 'qa-') && 'skipped' || 'live' }}");
   }
   if (kind === "ui-gate") {
     /* 和 qa-gate 同形，只是标签前缀与检查名换成 ui。 */
@@ -319,7 +319,10 @@ function lintCaller(kind, text, { qa, release, ui = false } = {}) {
     if (!has(/statuses:\s*write/)) bad.push("少了 statuses: write");
     if (!has(/pull-requests:\s*write/)) bad.push("少了 pull-requests: write");
     if (has(/^\s*paths(-ignore)?:/m)) bad.push("有 paths / paths-ignore：必需检查被 workflow 级过滤跳过就永远 pending");
-    partitionProblems("ui-gate", ["!startsWith(github.event.label.name, 'ui-')"], "&& 'skipped' || 'live'");
+    partitionProblems("ui-gate",
+      "ui-gate-${{ github.event.pull_request.number }}-${{ " +
+      "(github.event.action == 'labeled' || github.event.action == 'unlabeled') " +
+      "&& !startsWith(github.event.label.name, 'ui-') && 'skipped' || 'live' }}");
     if (!has(/uses:\s*GinkgoLeafLab\/dev-infra\/\.github\/workflows\/ui-gate\.yml@/)) bad.push("uses: 指的不是 dev-infra 的 ui-gate.yml（指到 qa-gate.yml 会写出 qa 而不是 ui）");
   }
   if (kind === "tag-on-merge") {
