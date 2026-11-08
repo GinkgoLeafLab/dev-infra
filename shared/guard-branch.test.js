@@ -143,12 +143,17 @@ for (const [name, cmd, wantMain, wantFeat] of CASES) {
 const wtRoot = fs.mkdtempSync(path.join(os.tmpdir(), "guard-wt-"));
 const worktree = path.join(wtRoot, "wt");
 execFileSync("git", ["worktree", "add", "-q", "-b", "feat/wt", worktree], { cwd: protectedRepo });
+/* 前提自证：链式 worktree 的 .git 是文件不是目录。普通目录也放行这些用例
+   （分支为空 = 不拦），没有这条断言，「测的是 worktree」就只是碰巧成立。 */
+if (fs.statSync(path.join(worktree, ".git")).isFile()) pass++;
+else { fail++; console.error("  ✗ [输入 cwd] worktree 是真链式：.git 应该是文件"); }
 
 for (const [name, procCwd, inputCwd, cmd, want] of [
   ["进程在主检出、输入 cwd 指特性 worktree", protectedRepo, worktree, G + "commit -m x", false],
   ["进程在特性 worktree、输入 cwd 指主检出", worktree, protectedRepo, G + "commit -m x", true],
   ["两边都在特性 worktree",                  worktree, worktree,   G + "commit -m x", false],
   ["裸推送按输入 cwd 的分支判定",             protectedRepo, worktree, G + "push",       false],
+  ["输入 cwd 指主检出的裸推送",               worktree, protectedRepo, G + "push",    true],
   ["输入没有 cwd 时退回进程 cwd",             protectedRepo, null,     G + "commit -m x", true],
 ]) {
   let got, err = null;
@@ -157,6 +162,8 @@ for (const [name, procCwd, inputCwd, cmd, want] of [
   else if (got === want) pass++;
   else { fail++; console.error(`  ✗ [输入 cwd] ${name}：期望${want ? "拦住" : "放行"}，实际${got ? "拦住" : "放行"}`); }
 }
+
+fs.rmSync(wtRoot, { recursive: true, force: true });
 
 /* --pre-commit 入口（第一版完全没测） */
 for (const [where, dir, want] of [["main", protectedRepo, 1], ["feat/x", featureRepo, 0]]) {

@@ -262,6 +262,8 @@ process.stdin.on("end", () => {
     let input = {};
     try { input = JSON.parse(raw || "{}"); }
     catch (e) { process.exit(0); }        // 不是合法 hook 输入，不是我们该管的事
+    /* input 为 JSON 字面量 null 时这一行抛 TypeError、走外层 catch → deny。
+       这是刻意的 fail-closed：旧版把它当成「非法输入」静默放行，收窄成拦下。 */
     const cmd = input.tool_input?.command || "";
     if (!cmd) process.exit(0);
 
