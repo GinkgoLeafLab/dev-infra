@@ -36,10 +36,13 @@ function makeRepo(branch) {
   return dir;
 }
 
-/** 跑一次 hook，返回 true=拦住。顺带校验 deny JSON 的结构完整性。 */
-function denied(cwd, command) {
+/** 跑一次 hook，返回 true=拦住。顺带校验 deny JSON 的结构完整性。
+    inputCwd 模拟 Claude Code 在 hook 输入 JSON 里带的会话工作目录。 */
+function denied(cwd, command, inputCwd) {
+  const input = { tool_input: { command } };
+  if (inputCwd) input.cwd = inputCwd;
   const out = execFileSync(process.execPath, [GUARD], {
-    cwd, input: JSON.stringify({ tool_input: { command } }), encoding: "utf8",
+    cwd, input: JSON.stringify(input), encoding: "utf8",
   });
   if (!out.trim()) return false;
   const j = JSON.parse(out);                       // 不合法 JSON 直接抛，测试失败
@@ -130,6 +133,37 @@ for (const [name, cmd, wantMain, wantFeat] of CASES) {
     else { fail++; console.error(`  ✗ [${where}] ${name}：期望${want ? "拦住" : "放行"}，实际${got ? "拦住" : "放行"}`); }
   }
 }
+
+/* —— PreToolUse 输入里的 cwd 优先于钩子进程的 cwd ——
+   Claude Desktop 的 worktree 会话里，app 把钩子进程的 cwd 设成仓库主检出（HEAD=main），
+   会话实际的工作目录在输入 JSON 的 cwd 字段里。只看进程 cwd 的话，特性分支 worktree
+   里的每一次提交都会被判成「当前在受保护分支上」——实测把 worktree 会话的合法提交
+   全堵死了，而 git 层的 pre-commit（cwd 由 git 设成 worktree 根）判定是对的。
+   这里用真的 `git worktree add`，不用一个普通目录冒充。 */
+const wtRoot = fs.mkdtempSync(path.join(os.tmpdir(), "guard-wt-"));
+const worktree = path.join(wtRoot, "wt");
+execFileSync("git", ["worktree", "add", "-q", "-b", "feat/wt", worktree], { cwd: protectedRepo });
+/* 前提自证：链式 worktree 的 .git 是文件不是目录。普通目录也放行这些用例
+   （分支为空 = 不拦），没有这条断言，「测的是 worktree」就只是碰巧成立。 */
+if (fs.statSync(path.join(worktree, ".git")).isFile()) pass++;
+else { fail++; console.error("  ✗ [输入 cwd] worktree 是真链式：.git 应该是文件"); }
+
+for (const [name, procCwd, inputCwd, cmd, want] of [
+  ["进程在主检出、输入 cwd 指特性 worktree", protectedRepo, worktree, G + "commit -m x", false],
+  ["进程在特性 worktree、输入 cwd 指主检出", worktree, protectedRepo, G + "commit -m x", true],
+  ["两边都在特性 worktree",                  worktree, worktree,   G + "commit -m x", false],
+  ["裸推送按输入 cwd 的分支判定",             protectedRepo, worktree, G + "push",       false],
+  ["输入 cwd 指主检出的裸推送",               worktree, protectedRepo, G + "push",    true],
+  ["输入没有 cwd 时退回进程 cwd",             protectedRepo, null,     G + "commit -m x", true],
+]) {
+  let got, err = null;
+  try { got = denied(procCwd, cmd, inputCwd); } catch (e) { err = e; }
+  if (err) { fail++; console.error(`  ✗ [输入 cwd] ${name}：${err.message}`); }
+  else if (got === want) pass++;
+  else { fail++; console.error(`  ✗ [输入 cwd] ${name}：期望${want ? "拦住" : "放行"}，实际${got ? "拦住" : "放行"}`); }
+}
+
+fs.rmSync(wtRoot, { recursive: true, force: true });
 
 /* --pre-commit 入口（第一版完全没测） */
 for (const [where, dir, want] of [["main", protectedRepo, 1], ["feat/x", featureRepo, 0]]) {
