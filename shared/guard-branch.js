@@ -35,6 +35,13 @@
    **失败必须 fail-closed。** PreToolUse 的 exit 1 属于 non-blocking error，工具照常执行。
    所以内部任何异常都要在 stdout 上吐出 deny JSON，绝不能靠非零退出码表达「拦住」。
 
+   **PreToolUse 那条路要读输入 JSON 里的 cwd，不能只看钩子进程自己的 cwd。**
+   Claude Desktop 的 worktree 会话里，app 把钩子进程的 cwd 设成仓库的主检出
+   （HEAD 往往是 main），会话实际的工作目录在 hook 输入的 `cwd` 字段里。只看进程 cwd
+   的话，worktree 里特性分支上的每一次提交都会被判成「当前在受保护分支上」——
+   实测把整个 worktree 会话的合法提交全堵死了。输入里没有 cwd 时退回进程 cwd，
+   与之前的判定口径完全一致（fail-closed 不变）。
+
    注意这只是本地约束，改 settings.json 或 git commit --no-verify 都能绕过。
    真正不可绕过的是 GitHub 上的 branch protection / ruleset，见 CLAUDE.md。 */
 const { execFileSync } = require("child_process");
@@ -56,10 +63,13 @@ const GIT_REDIRECTS = ["-C", "--git-dir", "--work-tree"];
    要看整条命令而不是单段 —— `cd /other && git commit` 里 cd 和 git 分属两段。 */
 const SHELL_REDIRECTS = ["cd", "pushd"];
 
-function currentBranch() {
+/* dir 是判定分支时该站进去的目录。PreToolUse 传 hook 输入里的 cwd（会话当前工作目录），
+   --pre-commit 不传（git 已经把进程 cwd 设成 worktree 根）。不给就沿用进程 cwd。 */
+function currentBranch(dir) {
   try {
     return execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
       encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
+      ...(dir ? { cwd: dir } : {}),
     }).trim();
   } catch (e) {
     return "";           // 不在 git 仓库里，或者 HEAD 还没出生
@@ -249,12 +259,16 @@ let raw = "";
 process.stdin.on("data", d => (raw += d));
 process.stdin.on("end", () => {
   try {
-    let cmd = "";
-    try { cmd = JSON.parse(raw || "{}").tool_input?.command || ""; }
+    let input = {};
+    try { input = JSON.parse(raw || "{}"); }
     catch (e) { process.exit(0); }        // 不是合法 hook 输入，不是我们该管的事
+    const cmd = input.tool_input?.command || "";
     if (!cmd) process.exit(0);
 
-    const branch = currentBranch();
+    /* app 给的会话工作目录。worktree 会话里它和钩子进程的 cwd 不是一个地方：
+       进程 cwd 是主检出，这里才是特性分支的 worktree。没有就沿用进程 cwd。 */
+    const cwd = typeof input.cwd === "string" && input.cwd ? input.cwd : undefined;
+    const branch = currentBranch(cwd);
     const v = violation(branch, cmd);
     if (v) deny(reason(branch, v.what, v.why, v.hint));
     process.exit(0);
