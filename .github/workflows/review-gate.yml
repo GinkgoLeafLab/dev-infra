@@ -206,15 +206,19 @@ jobs:
                  | jq -s 'add // []' 2>/dev/null) || BODY=""
           [ -n "$BODY" ] || BODY='[]'
 
-          # **多行/含特殊字符的值必须用 heredoc 定界符写**，不能写 `comments=$BODY`：
-          # $GITHUB_OUTPUT 是一行一条的格式，值里带换行会让 GitHub 直接拒掉这一步
-          # （报 "Invalid format"）。而评论体里**一定有换行**——那正是它的用处。
-          # 定界符用一个不会出现在 JSON 里的串。
-          {
-            echo "comments<<__LOCK_EOF__"
-            echo "$BODY"
-            echo "__LOCK_EOF__"
-          } >> "$GITHUB_OUTPUT"
+          # **评论线程是整份工作流里唯一会无限长大的文本，从这一步起它只走文件、
+          # 跨步骤只交路径**。旧的接法是把整段 JSON 经 `$GITHUB_OUTPUT` 交给下一步、
+          # 由它当 action 输入（`with: comments:`）喂给判定动作——而 action 输入
+          # 是以 `INPUT_*` / 自定义**环境变量**进 run 步进程的，Linux 对单个
+          # 环境变量有 128KB 上限（MAX_ARG_STRLEN）：线程累计一超，判定那步的
+          # bash 连 spawn 都失败（E2BIG，check-run 报 "Argument list too long"，
+          # 6 秒即败；Tianshu#423 推头 e3b1d3cf 的 run 43928760507 即此形状，
+          # 且会在**每个**线程长大的 PR 推头时复发）。
+          # 与下面「在新 head 上写 review commit status」那步的 body_path +
+          # `gh api --input "$BODY"` 同一个模式：大文本落 `$RUNNER_TEMP`，
+          # 只传它躺在哪。路径是一行短串、无换行，直接写，不需要 heredoc。
+          printf '%s\n' "$BODY" > "$RUNNER_TEMP/review-lock-comments.json"
+          echo "comments_path=$RUNNER_TEMP/review-lock-comments.json" >> "$GITHUB_OUTPUT"
 
       - name: 判这次推送有没有让在飞的评审作废
         if: github.event.action == 'synchronize'
@@ -228,7 +232,11 @@ jobs:
           # **快照，不是现读**：同 qa-gate/action.yml 里那段注释，事件发出来之后
           # 现读拿到的已经不是当时那一份。
           previous-labels: ${{ toJSON(github.event.pull_request.labels.*.name) }}
-          comments: ${{ steps.lock.outputs.comments }}
+          # **路径，不是内容**：评论 JSON 上一步已落进 `$RUNNER_TEMP` 的文件，
+          # 这里只传它躺在哪——内容本身过 action 输入会撞单环境变量 128KB 上限
+          # （理由见上一步注释；labels 是标签名数组，GitHub 每 PR 至多 100 个
+          # 标签、封顶远够不着上限，不受此约束）。
+          comments_path: ${{ steps.lock.outputs.comments_path }}
         id: decide
 
       # 钉死 head.sha（和上面那条通过检查同一个理由）：这次推送之后的 head。
