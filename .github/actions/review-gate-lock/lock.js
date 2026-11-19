@@ -259,15 +259,34 @@ function main() {
     throw new Error(`LOCK_PRESENT 必须是 "true" / "false"：${JSON.stringify(hasLockRaw)}`);
   }
 
-  /* 评论体：workflow 用 `gh api` 取回来之后原样喂进来。
-     取不到（API 失败）时 workflow 传 `[]`——**当没有锁**，见文件顶部失败方向。 */
+  /* 评论体：workflow 用 `gh api` 取回来之后**落进临时文件**，只把路径
+     （`LOCK_COMMENTS_FILE`）喂进来——内容不走环境变量：单个环境变量受 Linux
+     128KB（MAX_ARG_STRLEN）约束，PR 线程累计一超，这个进程连 spawn 都起不来
+     （E2BIG，"Argument list too long"：Tianshu#423 推头后的 run 43928760507）。
+     取不到（API 失败）时 workflow 往文件里写 `[]`——**当没有锁**，见文件顶部
+     失败方向；路径没传（空串）同样当 `[]`，等价于旧版 `comments` 输入的
+     default `"[]"`。文件在而读不了、或内容不是合法 JSON / 不是数组，一律抛
+     ——step 红，拦住，不放行。 */
   let comments;
-  try {
-    comments = JSON.parse(process.env.LOCK_COMMENTS || "[]");
-  } catch (e) {
-    throw new Error(`LOCK_COMMENTS 不是合法 JSON：${e.message}`);
+  const commentsFile = process.env.LOCK_COMMENTS_FILE || "";
+  if (commentsFile === "") {
+    comments = [];
+  } else {
+    let raw;
+    try {
+      raw = require("fs").readFileSync(commentsFile, "utf8");
+    } catch (e) {
+      throw new Error(`LOCK_COMMENTS_FILE 读不了（${commentsFile}）：${e.message}`);
+    }
+    try {
+      comments = JSON.parse(raw);
+    } catch (e) {
+      throw new Error(`LOCK_COMMENTS_FILE 不是合法 JSON（${commentsFile}）：${e.message}`);
+    }
   }
-  if (!Array.isArray(comments)) throw new Error("LOCK_COMMENTS 必须是数组");
+  if (!Array.isArray(comments)) {
+    throw new Error(`LOCK_COMMENTS_FILE 必须装着数组（${commentsFile}）`);
+  }
 
   /* now 可注入，测试才判得动 TTL。缺省取本机时间。 */
   const now = process.env.LOCK_NOW ? Number(process.env.LOCK_NOW) : Math.floor(Date.now() / 1000);

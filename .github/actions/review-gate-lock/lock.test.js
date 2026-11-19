@@ -205,13 +205,21 @@ ok("传了 target_url 就带上",
   statusBody({ hasLock: true, lock: findLock(comments(A)), pushedHead: B, previousHead: A, now: NOW },
     "https://example.invalid/x").status.target_url === "https://example.invalid/x");
 
-/* —— CLI：真的起一个进程跑 —— */
-function runCLI(env) {
-  const outFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "review-lock-")), "out");
+/* —— CLI：真的起一个进程跑 ——
+   评论经临时文件喂（LOCK_COMMENTS_FILE 装路径），与生产接线一致：
+   内容不进环境变量（Linux 单环境变量 128KB 上限，见 lock.js 同段注释）。
+   第二参给了就落文件；不给（undefined）= 没传路径，lock.js 当 `[]`。 */
+function runCLI(env, comments) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "review-lock-"));
+  const outFile = path.join(dir, "out");
   fs.writeFileSync(outFile, "");
+  if (comments !== undefined) {
+    fs.writeFileSync(path.join(dir, "comments.json"), comments);
+    env = { ...env, LOCK_COMMENTS_FILE: path.join(dir, "comments.json") };
+  }
   /* 环境变量要真的删掉，不能靠不传——父进程里可能有同名的。 */
   const e = { LOCK_HEAD: undefined, LOCK_BEFORE: undefined, LOCK_PRESENT: undefined,
-              LOCK_COMMENTS: undefined, LOCK_NOW: undefined, ...env };
+              LOCK_COMMENTS_FILE: undefined, LOCK_NOW: undefined, ...env };
   const clean = { ...process.env };
   for (const k of Object.keys(e)) if (e[k] === undefined) delete clean[k]; else clean[k] = e[k];
   try {
@@ -228,9 +236,8 @@ function runCLI(env) {
 
 /* 事故现场那一次推送，端到端跑一遍。 */
 const cli = runCLI({
-  LOCK_HEAD: B, LOCK_BEFORE: A, LOCK_PRESENT: "true",
-  LOCK_COMMENTS: JSON.stringify(comments(A)), LOCK_NOW: String(NOW),
-});
+  LOCK_HEAD: B, LOCK_BEFORE: A, LOCK_PRESENT: "true", LOCK_NOW: String(NOW),
+}, JSON.stringify(comments(A)));
 check("CLI 正常退出", cli.code, 0);
 check("CLI 吐出的是 failure 的 review 检查", JSON.parse(cli.stdout).state, "failure");
 check("CLI 用的 context 是 review", JSON.parse(cli.stdout).context, "review");
@@ -243,9 +250,8 @@ check("CLI 把 release_expired 写进 GITHUB_OUTPUT", /release_expired=false/.te
    `body_path` 指向的文件没有内容可写，action.yml 据此把 has_body 判成 false，
    工作流那一步就不会再去调 `gh api`。 */
 const cliNoLock = runCLI({
-  LOCK_HEAD: B, LOCK_BEFORE: A, LOCK_PRESENT: "false",
-  LOCK_COMMENTS: "[]", LOCK_NOW: String(NOW),
-});
+  LOCK_HEAD: B, LOCK_BEFORE: A, LOCK_PRESENT: "false", LOCK_NOW: String(NOW),
+}, "[]");
 check("没有锁时 CLI 正常退出（0，不是失败——这不是错误，是『没有评审在飞』）", cliNoLock.code, 0);
 check("没有锁（事故现场的真实输入）时 CLI 不吐任何检查体：stdout 必须是空串",
   cliNoLock.stdout, "");
@@ -256,19 +262,43 @@ check("没有锁时仍如实把 conclusion=ok 写进 GITHUB_OUTPUT（给 action.
    判定信的是事件快照里的标签（`LOCK_PRESENT`），不是评论——
    标签被摘掉之后旧评论还在，认它就会在一个已经放锁的 PR 上永远报作废。 */
 const cliLabelGone = runCLI({
-  LOCK_HEAD: B, LOCK_BEFORE: A, LOCK_PRESENT: "false",
-  LOCK_COMMENTS: JSON.stringify(comments(A)), LOCK_NOW: String(NOW),
-});
+  LOCK_HEAD: B, LOCK_BEFORE: A, LOCK_PRESENT: "false", LOCK_NOW: String(NOW),
+}, JSON.stringify(comments(A)));
 check("标签摘了之后旧评论不算数，CLI 不吐检查体", cliLabelGone.stdout, "");
 
 /* 超时释放那一次：也是 OK，也不该吐检查体，但仍要报 release_expired=true
    让工作流那边留痕（那一步不依赖 has_body，摘标签+留评论走的是另一条件）。 */
 const cliExpired = runCLI({
-  LOCK_HEAD: B, LOCK_BEFORE: A, LOCK_PRESENT: "true",
-  LOCK_COMMENTS: JSON.stringify(comments(A, "alice", PAST)), LOCK_NOW: String(NOW),
-});
+  LOCK_HEAD: B, LOCK_BEFORE: A, LOCK_PRESENT: "true", LOCK_NOW: String(NOW),
+}, JSON.stringify(comments(A, "alice", PAST)));
 check("超时那一次 CLI 也不吐检查体（它是 OK，不是 VOIDED/STALE）", cliExpired.stdout, "");
 check("超时那一次要报告 release_expired", /release_expired=true/.test(cliExpired.output), true);
+
+/* 路径没传（= action 输入的 default 空串：直接调这个动作的形状）→ 当 `[]`，
+   与旧版 `comments` 输入 default `"[]"` 的行为对齐。 */
+const cliNoFile = runCLI({
+  LOCK_HEAD: B, LOCK_BEFORE: A, LOCK_PRESENT: "false", LOCK_NOW: String(NOW),
+});
+check("没传 LOCK_COMMENTS_FILE 时当 []（没有锁），正常退出", cliNoFile.code, 0);
+check("没传 LOCK_COMMENTS_FILE 时不吐检查体（OK）", cliNoFile.stdout, "");
+
+/* **线程长大的那次推送——本次修复的事故形状**：评论累计 ≥128KB，超过 Linux
+   单环境变量上限（MAX_ARG_STRLEN 131072）。旧接线（内容经 `LOCK_COMMENTS`
+   环境变量进进程）在这规模下 bash 连 spawn 都失败（E2BIG：Tianshu#423 推头
+   e3b1d3cf 后的 review-gate run 43928760507）；走文件必须照样判得动。 */
+const fatComments = JSON.stringify(
+  comments(A).concat(Array.from({ length: 24 }, (_, i) => ({ body: "x".repeat(6000) + i }))));
+if (fatComments.length <= 131072) {
+  throw new Error(`夹具只有 ${fatComments.length} 字节，没到 128KB，测的不是事故形状`);
+}
+const cliFat = runCLI({
+  LOCK_HEAD: B, LOCK_BEFORE: A, LOCK_PRESENT: "true", LOCK_NOW: String(NOW),
+}, fatComments);
+check("≥128KB 的评论线程走文件：CLI 正常退出（旧接线此时 spawn 直接 E2BIG）",
+  cliFat.code, 0);
+check("≥128KB 的评论线程：判定不受影响，仍吐 failure 的检查体",
+  JSON.parse(cliFat.stdout).state, "failure");
+check("≥128KB 的评论线程：conclusion 仍是 voided", /conclusion=voided/.test(cliFat.output), true);
 
 /* 失败方向：全都要非零退出，而且**不许吐出检查体**——
    吐了的话 `gh api --input` 会拿着半截 JSON 去创建检查，那才是最糟的一种。 */
@@ -278,19 +308,21 @@ const BAD = [
   ["head 被截短",          { LOCK_HEAD: B.slice(0, 7), LOCK_BEFORE: A, LOCK_PRESENT: "true" }],
   ["缺 LOCK_PRESENT",      { LOCK_HEAD: B, LOCK_BEFORE: A, LOCK_PRESENT: undefined }],
   ["LOCK_PRESENT 不是布尔", { LOCK_HEAD: B, LOCK_BEFORE: A, LOCK_PRESENT: "yes" }],
-  ["评论不是 JSON",        { LOCK_HEAD: B, LOCK_BEFORE: A, LOCK_PRESENT: "true", LOCK_COMMENTS: "{" }],
-  ["评论不是数组",         { LOCK_HEAD: B, LOCK_BEFORE: A, LOCK_PRESENT: "true", LOCK_COMMENTS: '{"a":1}' }],
+  ["评论不是 JSON",        { LOCK_HEAD: B, LOCK_BEFORE: A, LOCK_PRESENT: "true" }, "{"],
+  ["评论不是数组",         { LOCK_HEAD: B, LOCK_BEFORE: A, LOCK_PRESENT: "true" }, '{"a":1}'],
+  ["评论文件不存在",       { LOCK_HEAD: B, LOCK_BEFORE: A, LOCK_PRESENT: "true",
+                             LOCK_COMMENTS_FILE: "/nonexistent/review-lock/comments.json" }],
   ["now 不是数字",         { LOCK_HEAD: B, LOCK_BEFORE: A, LOCK_PRESENT: "true", LOCK_NOW: "later" }],
 ];
-for (const [name, env] of BAD) {
-  const r = runCLI(env);
+for (const [name, env, comments] of BAD) {
+  const r = runCLI(env, comments);
   ok(`${name} → 非零退出（失败方向是拦住）`, r.code !== 0);
   check(`${name} → 不吐检查体`, r.stdout.trim(), "");
 }
 /* before 缺失**不是**错误：新分支的第一次推送就是这样，判定当「不判作废」处理。
    这一条是反向对照——上面那张表里全是「必须抛」，这里钉住一个「必须不抛」。 */
 const noBefore = runCLI({ LOCK_HEAD: B, LOCK_BEFORE: undefined, LOCK_PRESENT: "true",
-                          LOCK_COMMENTS: JSON.stringify(comments(A)), LOCK_NOW: String(NOW) });
+                          LOCK_NOW: String(NOW) }, JSON.stringify(comments(A)));
 check("before 缺失时不抛，正常判（新分支第一次推送）", noBefore.code, 0);
 check("before 缺失时读成空串、不判作废，也不吐检查体（OK）", noBefore.stdout, "");
 
@@ -367,14 +399,25 @@ check("before 缺失时读成空串、不判作废，也不吐检查体（OK）"
     !/--paginate[\s\S]{0,300}?--jq/.test(wfCode));
   ok("W11 分页结果必须被收成一段 JSON（`jq -s`）", /jq -s 'add \/\/ \[\]'/.test(wf));
 
-  /* W12：`$GITHUB_OUTPUT` 是**一行一条**的格式，值里带换行会被 GitHub 拒掉这一步
-     （"Invalid format"）。而评论体里一定有换行——那正是它的用处（锁元数据那条注释）。
-     所以必须用 heredoc 定界符写，不能写 `comments=$BODY`。 */
-  ok("W12 正对照：确实往 GITHUB_OUTPUT 里写 comments（下面判据不是凭空的）",
-    /comments/.test(wf) && /GITHUB_OUTPUT/.test(wf));
-  ok("W12 **多行的 comments 必须用 heredoc 定界符写进 $GITHUB_OUTPUT**"
-    + "（写 `comments=$BODY` 会因为值里有换行被 GitHub 拒掉）",
-    /comments<<__LOCK_EOF__/.test(wf));
+  /* W12：评论线程是这份工作流里唯一会无限长大的文本，跨步骤只许以**文件路径**
+     的形式出现。旧的 heredoc 接线（整段 JSON 进 `$GITHUB_OUTPUT`、再当 action
+     输入 `comments:` 喂给判定动作）会让内容以 `INPUT_*` / 自定义环境变量进
+     run 步进程——Linux 对单个环境变量有 128KB 上限（MAX_ARG_STRLEN），线程
+     累计一超，判定那步的 bash 连 spawn 都失败（E2BIG，check-run 报
+     "Argument list too long"：Tianshu#423 推头 e3b1d3cf 后的 run
+     43928760507，且会在每个线程长大的 PR 推头时复发）。 */
+  ok("W12 正对照：确实往 GITHUB_OUTPUT 里写 comments_path（下面判据不是凭空的）",
+    /comments_path=/.test(wfCode) && /GITHUB_OUTPUT/.test(wf));
+  ok("W12 **评论内容只落 $RUNNER_TEMP 的文件，跨步骤只传一行路径**"
+    + "（`printf > 文件` + `comments_path=` 一行一值 + `with:` 里喂的也是路径）",
+    wfCode.includes(`printf '%s\\n' "$BODY" > "$RUNNER_TEMP/review-lock-comments.json"`)
+      && wfCode.includes(`echo "comments_path=$RUNNER_TEMP/review-lock-comments.json" >> "$GITHUB_OUTPUT"`)
+      && wfCode.includes(`comments_path: \${{ steps.lock.outputs.comments_path }}`));
+  ok("W12 **旧的 heredoc 接线必须已废除**（整段评论进 GITHUB_OUTPUT 就是 E2BIG 陷阱）",
+    !/comments<<__LOCK_EOF__/.test(wf));
+  ok("W12 action.yml 的 env 只装路径（LOCK_COMMENTS_FILE），没有装内容的 LOCK_COMMENTS",
+    /LOCK_COMMENTS_FILE: \$\{\{ inputs\.comments_path \}\}/.test(act)
+      && !/LOCK_COMMENTS:/.test(act));
 
   /* W13 / W14：这次要修的洞——OK 时无条件写一条 success 的 review，
      把「缺席即拦」废掉了（GTO-Trainer#186/#189/#191）。
