@@ -20,10 +20,19 @@ name: ui-gate (reusable)
 
 on:
   workflow_call:
+    inputs:
+      runs-on:
+        description: >-
+          Runner label(s) for the gate job. Plain string (e.g. 'ubuntu-latest')
+          or JSON array string (e.g. '["self-hosted", "gate"]').
+        type: string
+        required: false
+        default: 'ubuntu-latest'
 
 jobs:
   gate:
-    runs-on: ubuntu-latest
+    # 缺省仍跑 GitHub 托管的 ubuntu-latest；消费仓传 JSON 数组（如 '["self-hosted", "gate"]'）可切到自托管 runner。
+    runs-on: ${{ startsWith(inputs.runs-on, '[') && fromJSON(inputs.runs-on) || inputs.runs-on }}
     timeout-minutes: 5
     # permissions 不写在这儿，见上面第 3 条。
     steps:
